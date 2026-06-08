@@ -1,0 +1,19 @@
+# ESP-IDF build output
+/build/
+/build-*/
+sdkconfig
+sdkconfig.old
+sdkconfig.ci
+
+# Managed components fetched by the IDF component manager
+/managed_components/
+dependencies.lock
+
+# Local design scratch — not committed (its content is distilled into AGENTS.md)
+SCAFFOLD.md
+
+# Editor / OS cruft
+.DS_Store
+*.swp
+.cache/
+compile_commands.json

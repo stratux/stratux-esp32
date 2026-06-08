@@ -1,0 +1,14 @@
+# Radio configuration: WiFi SoftAP — the primary GDL90-over-UDP output path.
+# Layered on top of sdkconfig.defaults via `-D RADIO=wifi` (the default).
+
+# --- Bluetooth OFF ---
+# Frees the BT controller + Bluedroid DRAM. The original ESP32 cannot host
+# both stacks at once; the Connext/BT variant is a separate binary (M6).
+CONFIG_BT_ENABLED=n
+
+# --- WiFi / lwIP ---
+# WiFi and lwIP are enabled by default in ESP-IDF; the key tuning here is
+# pushing their buffers into PSRAM to keep internal DRAM headroom comfortable
+# for the traffic table and decoders.
+CONFIG_ESP_WIFI_ENABLED=y
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y

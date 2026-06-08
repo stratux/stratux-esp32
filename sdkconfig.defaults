@@ -1,0 +1,42 @@
+# Common defaults — shared by both radio configurations. Radio-specific
+# settings live in sdkconfig.defaults.wifi / .bt and are layered on top via
+# SDKCONFIG_DEFAULTS (see top-level CMakeLists.txt).
+
+# Target chip — original ESP32 (TTGO T8, ESP32-D0WD-V3, silicon rev v3.1).
+CONFIG_IDF_TARGET="esp32"
+
+# Module ships with 4 MB flash; the default kconfig assumes 2 MB.
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="4MB"
+
+# --- PSRAM (TTGO T8: 8 MB physical, only 4 MB heap-mappable on original ESP32;
+# upper 4 MB is reachable only via the bank-switched himem API). Quad SPI,
+# auto-detect size, malloc-backed.
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_QUAD=y
+CONFIG_SPIRAM_TYPE_AUTO=y
+CONFIG_SPIRAM_SPEED_40M=y
+CONFIG_SPIRAM_BOOT_INIT=y
+CONFIG_SPIRAM_USE_MALLOC=y
+# Tolerate a non-PSRAM bring-up devkit: without this, SPIRAM_BOOT_INIT abort()s
+# at boot when no PSRAM is found.
+CONFIG_SPIRAM_IGNORE_NOTFOUND=y
+
+# --- Partition table — custom layout to use the full 4 MB (partitions.csv) ---
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_PARTITION_TABLE_OFFSET=0x8000
+
+# --- Tasks / stacks ---
+# 8 KB main task stack for headroom (matches connext-emulator baseline).
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
+# --- Logging ---
+# Log with ESP_LOGx directly; avoid deep custom logging callbacks on the main
+# task (the lesson from connext's early-boot-loop debugging).
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+
+# --- HTTP server ---
+# WebSocket support for the web UI live feeds (WS /traffic, WS /status — §10/M2);
+# enables the httpd_uri_t .is_websocket field used by components/web.
+CONFIG_HTTPD_WS_SUPPORT=y

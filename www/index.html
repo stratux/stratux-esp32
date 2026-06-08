@@ -1,0 +1,32 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Stratux ESP32</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 1rem; }
+  table { border-collapse: collapse; width: 100%; margin-top: 1rem; }
+  th, td { border: 1px solid #ccc; padding: 4px 8px; text-align: left; }
+</style>
+<h1>Stratux ESP32</h1>
+<section id="status">connecting…</section>
+<table id="traffic">
+  <thead><tr><th>ICAO</th><th>Callsign</th><th>Alt</th><th>Dist</th><th>Brg</th></tr></thead>
+  <tbody></tbody>
+</table>
+<script>
+  async function poll() {
+    try {
+      const s = await (await fetch('/getStatus')).json();
+      document.getElementById('status').textContent =
+        `Pong ${s.pong ? 'up' : 'down'} · ES ${s.es} · UAT ${s.uat} · ` +
+        `clients ${s.clients} · UTC ${s.utc_ok ? 'ok' : '—'} · v${s.version}`;
+    } catch (e) {
+      document.getElementById('status').textContent = 'disconnected';
+    }
+  }
+  setInterval(poll, 1000);
+  poll();
+
+  // M2: live traffic over WebSocket.
+  const ws = new WebSocket(`ws://${location.host}/traffic`);
+  ws.onmessage = e => { /* TODO(M2): render JSON rows into #traffic tbody */ };
+</script>
