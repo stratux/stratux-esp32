@@ -73,17 +73,29 @@ void gdl90_out_init(void)
     ESP_LOGI(TAG, "CRC self-test ok: 0xBEEF (GDL90 ICD §2.2.4 variant)");
 }
 
-// Build the 7-byte GDL90 heartbeat (0x00). M0: status bits reflect g_status —
-// crucially leave the "UTC OK" bit CLEAR and the timestamp zero until a real
-// clock exists (M0). Full bit layout: Stratux gen_gdl90.go makeHeartbeat.
+// Build the 7-byte GDL90 heartbeat (0x00). Byte layout per Stratux
+// gen_gdl90.go makeHeartbeat (the reference sender EFBs trust).
 static size_t build_heartbeat(uint8_t *p)
 {
     memset(p, 0, 7);
     p[0] = GDL90_MSG_HEARTBEAT;
-    p[1] = 0x01;                       // Status byte 1: GPS pos valid? no -> bit set only when ready
-    p[2] = g_status.utc_ok ? 0x01 : 0x00;  // Status byte 2 bit0 = UTC OK (CLEAR at M0)
-    // p[3..4] timestamp (LE, seconds since 0000Z) — zero until UTC OK.
-    // p[5..6] message counts.
+
+    // Status Byte 1: bit0 "UAT Initialized" + bit4 "Addr talkback" — both always
+    // set by Stratux. bit7 (GPS pos valid) and bit6 (maintenance req'd) get
+    // added once GPS / error wiring exists (M3+).
+    p[1] = 0x01 | 0x10;
+
+    // Status Byte 2 + 17-bit "seconds since 0000Z" timestamp: bit16 -> SB2 bit7,
+    // low 16 bits -> p[3..4] little-endian; SB2 bit0 = "UTC OK".
+    // AGENTS.md M0: with no clock, keep UTC OK CLEAR and the timestamp ZERO
+    // rather than lying about time. Ready for the M3 time source.
+    if (g_status.utc_ok) {
+        uint32_t s = g_status.secs_since_midnight;
+        p[2] = (uint8_t)(((s >> 16) << 7) | 0x01);
+        p[3] = (uint8_t)(s & 0xFF);
+        p[4] = (uint8_t)((s >> 8) & 0xFF);
+    }
+    // p[5..6] = uplink/basic+long message counts — 0 at M0 (gen_gdl90.go p.12).
     return 7;
 }
 

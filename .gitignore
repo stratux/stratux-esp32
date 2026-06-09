@@ -17,3 +17,9 @@ SCAFFOLD.md
 *.swp
 .cache/
 compile_commands.json
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/

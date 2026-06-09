@@ -15,6 +15,7 @@ typedef struct {
     uint32_t uat_msgs;         // UAT frames decoded since boot
     uint32_t pong_errors;      // "ERROR SPI" + line-parse failures
     bool     utc_ok;           // real time source acquired (GPS/NTP/manual) — false until M3
+    uint32_t secs_since_midnight; // seconds since 0000Z; only meaningful when utc_ok (M3)
 } stratux_status_t;
 
 // Single process-wide instance (defined in stratux_status.c).

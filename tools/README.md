@@ -32,6 +32,12 @@ Unix epoch. `#` lines are comments. Replay/capture need **pyserial**
   / `--start`.
 - **`fisb_time.py`** — FIS-B uplink time decoder + fit (ported/verified against
   Stratux `uatparse/uatparse.go`); imported by reconstruct.
+- **`gdl90_listen.py`** — validate the firmware's GDL90 output: join the device's
+  `stratux` AP (so it leases you an address and unicasts to you), then
+  `gdl90_listen.py [--seconds N] [--raw]`. Deframes, verifies the GDL90-variant
+  CRC (`123456789 -> 0xBEEF`), decodes heartbeat fields, and reports per-message
+  rates. The M0 check: ~1/s `Heartbeat` with `UTC_OK=0 ts=0` and no CRC failures.
+  Pure stdlib.
 
 ### Firmware dev mode — replay over the single USB cable
 
