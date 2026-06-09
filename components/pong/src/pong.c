@@ -12,7 +12,11 @@
 static const char *TAG = "pong";
 
 #define PONG_RX_BUF   (4 * 1024)   // 3 Mbaud is bursty; give the driver headroom
-#define PONG_LINE_MAX 256
+// Must hold the longest Pong line. UAT uplink (FIS-B) frames reach 877 chars in
+// real captures (864 hex + '+' + ";rs=..;ss=..;"); 256 silently dropped ~64% of
+// uplink lines via the overlong-line resync below. PONG_HEX_MAX (896) + the
+// classifier/ss/rs suffix fits comfortably in 1024.
+#define PONG_LINE_MAX 1024
 
 // Classify a line by its first character (Appendix A).
 static pong_line_kind_t classify(char c)
@@ -46,14 +50,18 @@ static void handle_line(char *line)
             return;
 
         case PONG_LINE_1090ES:
-            // TODO(M1): copy hex (between '*' and ';') into f.hex/f.hex_len,
-            //   parse trailing "ss=" as HEX. Then:
+            // TODO(M1): copy hex (between '*' and the first ';') into
+            //   f.hex/f.hex_len. The "ss=" field is OPTIONAL on 1090ES lines:
+            //   only set f.ss/f.ss_valid if a literal "ss=" is found (HEX).
+            //   Do NOT treat the trailing ";<n>" some firmware emits as ss —
+            //   that is a message counter. Like Stratux, key off report[0].
             if (g_settings.es_en) modes_decode_frame(&f);
             return;
 
         case PONG_LINE_UAT_DOWN:
         case PONG_LINE_UAT_UP:
-            // TODO(M1): copy hex, parse "rs="/"ss=" (ss is hex int8; 0x80 = errored).
+            // TODO(M1): copy hex, parse "rs="/"ss=" (ss is hex int8; 0x80 =
+            //   errored). UAT lines carry ss= reliably; set f.ss_valid when found.
             if (g_settings.uat_en) uat_decode_frame(&f);
             return;
 
