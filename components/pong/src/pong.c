@@ -176,24 +176,30 @@ void pong_rx_task(void *arg)
 #endif
 
     static char line[PONG_LINE_MAX];
+    static uint8_t chunk[256];
     size_t len = 0;
-    uint8_t byte;
 
     for (;;) {
-        // TODO(M1): batch reads (uart_read_bytes into a chunk) for 3 Mbaud
-        // throughput; byte-at-a-time here is just the readable skeleton form.
-        int n = uart_read_bytes(PONG_ACTIVE_PORT, &byte, 1, portMAX_DELAY);
-        if (n != 1) continue;
+        // Chunked reads for 3 Mbaud throughput: drain whatever the driver
+        // ring has buffered (up to a chunk), waiting at most 20 ms for the
+        // first byte so partial lines are delivered promptly. 256 bytes is
+        // ~0.85 ms of line time at 3 Mbaud against the 4 KB driver ring.
+        int n = uart_read_bytes(PONG_ACTIVE_PORT, chunk, sizeof(chunk),
+                                pdMS_TO_TICKS(20));
+        if (n <= 0) continue;
 
-        if (byte == '\n' || byte == '\r') {
-            if (len == 0) continue;
-            line[len] = '\0';
-            handle_line(line);
-            len = 0;
-        } else if (len < PONG_LINE_MAX - 1) {
-            line[len++] = (char)byte;
-        } else {
-            len = 0;   // overlong line; resync on next newline
+        for (int i = 0; i < n; i++) {
+            uint8_t byte = chunk[i];
+            if (byte == '\n' || byte == '\r') {
+                if (len == 0) continue;
+                line[len] = '\0';
+                handle_line(line);
+                len = 0;
+            } else if (len < PONG_LINE_MAX - 1) {
+                line[len++] = (char)byte;
+            } else {
+                len = 0;   // overlong line; resync on next newline
+            }
         }
     }
 }
