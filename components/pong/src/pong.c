@@ -90,11 +90,45 @@ static void handle_line(char *line)
         }
 
         case PONG_LINE_UAT_DOWN:
-        case PONG_LINE_UAT_UP:
-            // TODO(M1): copy hex, parse "rs="/"ss=" (ss is hex int8; 0x80 =
-            //   errored). UAT lines carry ss= reliably; set f.ss_valid when found.
+        case PONG_LINE_UAT_UP: {
+            // Hex payload between the classifier and the first ';', e.g.
+            // -00a66ef1...4800;rs=1;ss=A2;  A downlink is exactly a short
+            // (18 B) or long (34 B) frame; anything else is line corruption,
+            // dropped here so the decoder only sees plausible frames. Uplink
+            // length is unchecked until the M5 decoder defines what it takes.
+            const char *body = line + 1;
+            const char *semi = strchr(body, ';');
+            size_t hlen = semi ? (size_t)(semi - body) : strlen(body);
+            if (hlen >= PONG_HEX_MAX) hlen = PONG_HEX_MAX - 1;
+            if (f.kind == PONG_LINE_UAT_DOWN && hlen != 36 && hlen != 68) {
+                g_status.pong_errors++;
+                return;
+            }
+            memcpy(f.hex, body, hlen);
+            f.hex[hlen] = '\0';
+            f.hex_len = (uint16_t)hlen;
+
+            // Scan ';'-separated suffix fields — captures carry any subset
+            // of rs=/ss=, in any order. "rs=" is decimal (Reed-Solomon
+            // symbols corrected, diagnostics only). "ss=" is a HEX int8
+            // log-detector reading where 0x80 (-128) flags an errored
+            // measurement — leave ss_valid clear for it. Never parse ss as
+            // decimal (Stratux's Atoi path is a known bug, Appendix A).
+            for (const char *p = semi; p; p = strchr(p + 1, ';')) {
+                if (strncmp(p + 1, "rs=", 3) == 0) {
+                    f.rs = (uint16_t)strtoul(p + 4, NULL, 10);
+                } else if (strncmp(p + 1, "ss=", 3) == 0) {
+                    unsigned long v = strtoul(p + 4, NULL, 16);
+                    if ((v & 0xFF) != 0x80) {
+                        f.ss = (uint16_t)v;
+                        f.ss_valid = 1;
+                    }
+                }
+            }
+
             if (g_settings.uat_en) uat_decode_frame(&f);
             return;
+        }
 
         default:
             return;
