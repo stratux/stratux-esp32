@@ -5,6 +5,7 @@
 #include "driver/uart.h"
 #include "driver/gpio.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "pins.h"
 #include "settings.h"
 #include "stratux_status.h"
@@ -33,6 +34,33 @@ static const char *TAG = "pong";
 // classifier/ss/rs suffix fits comfortably in 1024.
 #define PONG_LINE_MAX 1024
 
+// "ERROR SPI" is a fault inside the Pong's radio chip: there is no Pong reset
+// GPIO in the pin plan (GPIO32 is a static RTS level with unproven semantics)
+// and reference Stratux only logs the message. What we CAN do from this side:
+// drop the in-flight line state and the driver backlog (likely interleaved
+// with fault spew) and mark the device degraded; the Pong's own heartbeat or
+// the next decoded frame proves recovery and clears the flag. Rate-limited so
+// a fault storm doesn't flush the link continuously. This is also the single
+// seam for an RTS-based reset if bench testing ever reveals one.
+static bool s_flush_pending;
+
+static void pong_recover(void)
+{
+    static int64_t s_last_attempt_ms;
+    static unsigned s_attempts;
+
+    const int64_t now_ms = esp_timer_get_time() / 1000;
+    if (s_last_attempt_ms != 0 && now_ms - s_last_attempt_ms < 10000)
+        return;
+    s_last_attempt_ms = now_ms;
+    s_attempts++;
+
+    g_status.pong_degraded = true;
+    s_flush_pending = true;
+    ESP_LOGE(TAG, "Pong reported ERROR SPI — flushing link, marked degraded "
+                  "(recovery attempt %u)", s_attempts);
+}
+
 // Classify a line by its first character (Appendix A).
 static pong_line_kind_t classify(char c)
 {
@@ -54,17 +82,18 @@ static void handle_line(char *line)
     switch (f.kind) {
         case PONG_LINE_HEARTBEAT:
             g_status.pong_connected = true;
+            g_status.pong_degraded = false;
             return;
 
         case PONG_LINE_LOG:
             if (strstr(line, "ERROR SPI")) {
                 g_status.pong_errors++;
-                ESP_LOGW(TAG, "Pong reported ERROR SPI — TODO(M1): real recovery "
-                              "(reopen UART / toggle reset GPIO / mark degraded)");
+                pong_recover();
             }
             return;
 
         case PONG_LINE_1090ES: {
+            g_status.pong_degraded = false;   // demodulated frames = radio alive
             // The hex frame is everything between '*' and the first ';'
             // (e.g. *8DC01C2860C37797E9732E555B23;ss=049D;). Like Stratux, we
             // key off that first field and ignore the rest.
@@ -91,6 +120,7 @@ static void handle_line(char *line)
 
         case PONG_LINE_UAT_DOWN:
         case PONG_LINE_UAT_UP: {
+            g_status.pong_degraded = false;   // demodulated frames = radio alive
             // Hex payload between the classifier and the first ';', e.g.
             // -00a66ef1...4800;rs=1;ss=A2;  A downlink is exactly a short
             // (18 B) or long (34 B) frame; anything else is line corruption,
@@ -199,6 +229,19 @@ void pong_rx_task(void *arg)
                 line[len++] = (char)byte;
             } else {
                 len = 0;   // overlong line; resync on next newline
+            }
+
+            // ERROR SPI recovery (pong_recover): drop the assembler state,
+            // the rest of this chunk, and the driver backlog — all read
+            // around the fault and suspect. Console replay keeps its driver
+            // untouched; the dropped bytes resync on the next newline.
+            if (s_flush_pending) {
+                s_flush_pending = false;
+                len = 0;
+#if !CONFIG_PONG_SOURCE_CONSOLE
+                uart_flush_input(PONG_ACTIVE_PORT);
+#endif
+                break;
             }
         }
     }

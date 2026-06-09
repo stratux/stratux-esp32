@@ -11,6 +11,8 @@
 // for a status pane), so plain reads/writes are acceptable on the ESP32.
 typedef struct {
     bool     pong_connected;   // Pong heartbeat/frame seen within the link timeout
+    bool     pong_degraded;    // Pong reported ERROR SPI; cleared when frames or
+                               // heartbeats prove the radio is alive again
     uint32_t es_msgs;          // 1090ES frames decoded since boot
     uint32_t es_rejected;      // 1090ES frames rejected (CRC fail / unknown DF) —
                                // distinguishes a degraded RF path from empty air
