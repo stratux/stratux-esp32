@@ -9,6 +9,11 @@
 
 static const char *TAG = "gdl90";
 
+// Latched by gdl90_out_init(): true only if the CRC self-test produced 0xBEEF.
+// gdl90_emit_task() refuses to run if this is false — a mis-built CRC would make
+// every frame CRC-fail at the EFB, so silence is correct.
+static bool s_crc_ok = false;
+
 #define GDL90_FLAG  0x7E
 #define GDL90_ESC   0x7D
 
@@ -59,10 +64,12 @@ void gdl90_out_init(void)
     // GDL90-variant self-test: "123456789" -> 0xBEEF (XMODEM would be 0x31C3).
     uint16_t v = gdl90_crc16((const uint8_t *)"123456789", 9);
     if (v != 0xBEEF) {
+        s_crc_ok = false;
         ESP_LOGE(TAG, "CRC self-test FAILED: got 0x%04x, expected 0xBEEF — "
-                      "do NOT emit (every frame would CRC-fail)", v);
-        return;   // TODO(M0): latch a fault so gdl90_emit_task refuses to send.
+                      "GDL90 emit DISABLED (every frame would CRC-fail)", v);
+        return;
     }
+    s_crc_ok = true;
     ESP_LOGI(TAG, "CRC self-test ok: 0xBEEF (GDL90 ICD §2.2.4 variant)");
 }
 
@@ -83,6 +90,10 @@ static size_t build_heartbeat(uint8_t *p)
 void gdl90_emit_task(void *arg)
 {
     (void)arg;
+    if (!s_crc_ok) {
+        ESP_LOGE(TAG, "CRC self-test failed at init; emitter idle (no frames sent)");
+        vTaskDelete(NULL);
+    }
     uint8_t payload[512];
     uint8_t frame[1024];
 

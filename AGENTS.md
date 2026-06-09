@@ -161,10 +161,15 @@ match byte-for-byte or every frame CRC-fails. Framing:
 NTP, or a manual time push sets the clock, emit the GDL90 heartbeat with the
 **"UTC OK" bit CLEAR** and a zero timestamp rather than lying about time.
 
-**EFB UDP delivery — open question.** No dnsmasq on the ESP32. M0 broadcasts to
-`192.168.10.255:4000`; M2 should enumerate associated SoftAP stations (track
-`IP_EVENT_AP_STAIPASSIGNED`) and unicast. Validate which ForeFlight / Garmin Pilot
-actually accept before committing.
+**EFB UDP delivery — per-lease unicast (matches Stratux).** No dnsmasq on the
+ESP32, but the SoftAP's own DHCP server is the lease source. `net.c` tracks
+clients via `IP_EVENT_AP_STAIPASSIGNED` / `WIFI_EVENT_AP_STADISCONNECTED` and
+unicasts each GDL90 datagram to every lease on `:4000` — the analog of Stratux
+`network.go`'s `getDHCPLeases()` + per-client `DialUDP`. Do **not** broadcast:
+802.11 sends broadcast/multicast at the lowest basic rate, buffered until DTIM,
+so power-saving EFB tablets drop them. The AP IP is pinned to `192.168.10.1/24`
+so leases land on the subnet EFBs expect. Sleep/throttle detection (Stratux
+`isSleeping`/`isThrottled`) is a later refinement, not correctness.
 
 ## Configuration (NVS)
 
@@ -197,7 +202,7 @@ existing EFB setups "just work." Read/written via the web UI (`/getSettings`,
   position, velocity (TC 19), identity (TC 1–4), NIC/NACp, DF18 ADS-R/TIS-B.
   Prefer porting dump1090's `mode_s.c` message layer over hand-rolling.
 - **M2** Web UI + robustness (settings → NVS, live traffic WS, raw-Pong diag,
-  cross-band dedup, per-station unicast).
+  cross-band dedup). Per-lease unicast delivery already landed in M0.
 - **M3** GPS/ownship (0x0A/0x0B) — also supplies the time source ("UTC OK").
 - **M4** AHRS (0x65 sub-id 0x01 / Levil 0x4C).
 - **M5** UAT uplink: a) passthrough as GDL90 0x07; b) embedded FIS-B + `wxstore`
