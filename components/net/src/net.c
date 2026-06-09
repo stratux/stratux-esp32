@@ -6,6 +6,8 @@
 #include "esp_wifi.h"
 #include "esp_netif.h"
 #include "esp_event.h"
+#include "esp_timer.h"
+#include "esp_mac.h"
 #include "lwip/sockets.h"
 #include "settings.h"
 
@@ -14,9 +16,19 @@ static const char *TAG = "net";
 #define GDL90_UDP_PORT   4000
 #define MAX_CLIENTS      8        // SoftAP max_connection is 4; headroom for churn
 
+// Deauth-nudge: if a station associates but never re-runs DHCP (common after an
+// ESP32 reboot — the client keeps its cached IP, so IP_EVENT_AP_STAIPASSIGNED
+// never fires and we have no address to unicast GDL90 to), kick it once so it
+// re-associates and re-DHCPs. Addresses the root cause without persisting leases.
+#define NUDGE_GRACE_MS   6000     // let a fresh client DHCP on its own first
+#define NUDGE_REARM_MS   30000    // a reconnect this long after a kick is "fresh"
+#define NUDGE_MAX_KICKS  3        // bound attempts so a non-DHCP client can't loop
+#define NUDGE_PERIOD_US  (2 * 1000 * 1000)
+
 static int               s_udp_sock = -1;
 static SemaphoreHandle_t s_lease_mux;
 static esp_netif_t      *s_ap_netif;   // SoftAP handle, for DHCP lease lookups
+static esp_timer_handle_t s_nudge_timer;
 
 // EFB "lease table": one entry per associated station the SoftAP's DHCP server
 // has handed an address. This is the ESP32 equivalent of Stratux's
@@ -33,6 +45,69 @@ typedef struct {
 } lease_t;
 
 static lease_t s_leases[MAX_CLIENTS];
+
+// Association tracking for the deauth-nudge (separate from the lease cache: a
+// station can be associated without a lease — that is exactly the case we fix).
+typedef struct {
+    bool     used;
+    bool     associated;
+    uint8_t  mac[6];
+    uint16_t aid;
+    int64_t  since_ms;     // association / last-rearm time (grace window start)
+    int64_t  last_kick_ms;
+    int      kicks;
+} assoc_t;
+
+static assoc_t s_assoc[MAX_CLIENTS];
+
+// Mark a station associated (from WIFI_EVENT_AP_STACONNECTED). Re-arms the grace
+// window; clears the kick counter only if this looks like a genuine fresh join
+// (not the re-association our own deauth just triggered).
+static void assoc_connected(const uint8_t mac[6], uint16_t aid, int64_t now_ms)
+{
+    xSemaphoreTake(s_lease_mux, portMAX_DELAY);
+    int slot = -1;
+    for (int i = 0; i < MAX_CLIENTS; i++) {
+        if (s_assoc[i].used && memcmp(s_assoc[i].mac, mac, 6) == 0) { slot = i; break; }
+        if (!s_assoc[i].used && slot < 0) slot = i;
+    }
+    if (slot >= 0) {
+        assoc_t *a = &s_assoc[slot];
+        bool fresh = !a->used || (now_ms - a->last_kick_ms) > NUDGE_REARM_MS;
+        a->used = true;
+        a->associated = true;
+        memcpy(a->mac, mac, 6);
+        a->aid = aid;
+        a->since_ms = now_ms;
+        if (fresh) a->kicks = 0;
+    }
+    xSemaphoreGive(s_lease_mux);
+}
+
+static void assoc_disconnected(const uint8_t mac[6])
+{
+    xSemaphoreTake(s_lease_mux, portMAX_DELAY);
+    for (int i = 0; i < MAX_CLIENTS; i++) {
+        if (s_assoc[i].used && memcmp(s_assoc[i].mac, mac, 6) == 0) {
+            // Keep the entry (kick bookkeeping must survive the brief
+            // disconnect our own deauth causes); just mark it not associated.
+            s_assoc[i].associated = false;
+        }
+    }
+    xSemaphoreGive(s_lease_mux);
+}
+
+// A successful lease means the client is reachable — stop nudging it.
+static void assoc_resolved(const uint8_t mac[6])
+{
+    xSemaphoreTake(s_lease_mux, portMAX_DELAY);
+    for (int i = 0; i < MAX_CLIENTS; i++) {
+        if (s_assoc[i].used && memcmp(s_assoc[i].mac, mac, 6) == 0) {
+            s_assoc[i].kicks = 0;
+        }
+    }
+    xSemaphoreGive(s_lease_mux);
+}
 
 static void lease_upsert(const uint8_t mac[6], uint32_t ip)
 {
@@ -73,11 +148,86 @@ static void net_event_handler(void *arg, esp_event_base_t base,
     if (base == IP_EVENT && id == IP_EVENT_AP_STAIPASSIGNED) {
         ip_event_ap_staipassigned_t *e = (ip_event_ap_staipassigned_t *)data;
         lease_upsert(e->mac, e->ip.addr);
+        assoc_resolved(e->mac);
         ESP_LOGI(TAG, "EFB client lease " IPSTR, IP2STR(&e->ip));
+    } else if (base == WIFI_EVENT && id == WIFI_EVENT_AP_STACONNECTED) {
+        wifi_event_ap_staconnected_t *e = (wifi_event_ap_staconnected_t *)data;
+        assoc_connected(e->mac, e->aid, esp_timer_get_time() / 1000);
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_AP_STADISCONNECTED) {
         wifi_event_ap_stadisconnected_t *e = (wifi_event_ap_stadisconnected_t *)data;
         lease_remove(e->mac);
+        assoc_disconnected(e->mac);
         ESP_LOGI(TAG, "EFB client disconnected; lease dropped");
+    }
+}
+
+// True if the DHCP server (or our event cache) currently knows an IP for this
+// MAC — i.e. the client has completed DHCP and is reachable for unicast.
+static bool mac_has_ip(const uint8_t mac[6])
+{
+    xSemaphoreTake(s_lease_mux, portMAX_DELAY);
+    for (int i = 0; i < MAX_CLIENTS; i++) {
+        if (s_leases[i].used && s_leases[i].ip &&
+            memcmp(s_leases[i].mac, mac, 6) == 0) {
+            xSemaphoreGive(s_lease_mux);
+            return true;
+        }
+    }
+    xSemaphoreGive(s_lease_mux);
+
+    if (s_ap_netif) {
+        esp_netif_pair_mac_ip_t pair;
+        memset(&pair, 0, sizeof(pair));
+        memcpy(pair.mac, mac, 6);
+        if (esp_netif_dhcps_get_clients_by_mac(s_ap_netif, 1, &pair) == ESP_OK &&
+            pair.ip.addr != 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Periodic: kick any station that has been associated past the grace window but
+// still has no resolvable IP, so it re-associates and re-runs DHCP.
+static void nudge_timer_cb(void *arg)
+{
+    (void)arg;
+    int64_t now = esp_timer_get_time() / 1000;
+
+    // Snapshot candidates under the lock, act (deauth) outside it.
+    struct { uint8_t mac[6]; uint16_t aid; int slot; } cand[MAX_CLIENTS];
+    int nc = 0;
+
+    xSemaphoreTake(s_lease_mux, portMAX_DELAY);
+    for (int i = 0; i < MAX_CLIENTS; i++) {
+        assoc_t *a = &s_assoc[i];
+        if (a->used && a->associated &&
+            a->kicks < NUDGE_MAX_KICKS &&
+            (now - a->since_ms) >= NUDGE_GRACE_MS) {
+            memcpy(cand[nc].mac, a->mac, 6);
+            cand[nc].aid = a->aid;
+            cand[nc].slot = i;
+            nc++;
+        }
+    }
+    xSemaphoreGive(s_lease_mux);
+
+    for (int i = 0; i < nc; i++) {
+        if (mac_has_ip(cand[i].mac))
+            continue;   // resolved on its own during the grace window
+        ESP_LOGW(TAG, "no DHCP lease for " MACSTR " (aid=%u) after %dms; "
+                      "deauth to force re-DHCP", MAC2STR(cand[i].mac),
+                 cand[i].aid, NUDGE_GRACE_MS);
+        esp_wifi_deauth_sta(cand[i].aid);
+
+        xSemaphoreTake(s_lease_mux, portMAX_DELAY);
+        assoc_t *a = &s_assoc[cand[i].slot];
+        if (a->used && memcmp(a->mac, cand[i].mac, 6) == 0) {
+            a->kicks++;
+            a->last_kick_ms = now;
+            a->since_ms = now;   // re-arm grace for the next check
+        }
+        xSemaphoreGive(s_lease_mux);
     }
 }
 
@@ -113,6 +263,8 @@ void net_wifi_softap_start(void)
     ESP_ERROR_CHECK(esp_event_handler_instance_register(
         IP_EVENT, IP_EVENT_AP_STAIPASSIGNED, net_event_handler, NULL, NULL));
     ESP_ERROR_CHECK(esp_event_handler_instance_register(
+        WIFI_EVENT, WIFI_EVENT_AP_STACONNECTED, net_event_handler, NULL, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(
         WIFI_EVENT, WIFI_EVENT_AP_STADISCONNECTED, net_event_handler, NULL, NULL));
 
     wifi_config_t wc = { 0 };
@@ -133,6 +285,14 @@ void net_wifi_softap_start(void)
 
     // GDL90 UDP sender. Datagrams are unicast per lease in net_gdl90_send().
     s_udp_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+
+    // Periodic deauth-nudge: force re-DHCP for associated-but-unresolved clients.
+    const esp_timer_create_args_t nudge_args = {
+        .callback = nudge_timer_cb,
+        .name = "gdl90_nudge",
+    };
+    ESP_ERROR_CHECK(esp_timer_create(&nudge_args, &s_nudge_timer));
+    ESP_ERROR_CHECK(esp_timer_start_periodic(s_nudge_timer, NUDGE_PERIOD_US));
 
     ESP_LOGI(TAG, "SoftAP up: SSID=%s chan=%u auth=%s; GDL90 unicast -> leases:%d",
              g_settings.wifi_ssid, wc.ap.channel,
