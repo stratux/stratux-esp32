@@ -11,11 +11,12 @@
 // Semantic address source. NOT a wire format: gdl90_out maps these to the
 // GDL90 address-type nibble explicitly (the ICD has no "UAT" address type).
 typedef enum {
-    ADDR_TYPE_ADSB_ICAO = 0,   // DF17 / ES with ICAO address
-    ADDR_TYPE_ADSB_OTHER,      // non-ICAO address
-    ADDR_TYPE_TISB_ICAO,       // DF18 TIS-B / ADS-R, ICAO
-    ADDR_TYPE_TISB_OTHER,      // DF18 TIS-B / ADS-R, non-ICAO
-    ADDR_TYPE_UAT,             // 978 UAT downlink
+    ADDR_TYPE_ADSB_ICAO = 0,   // DF17 / ES or UAT AQ0, ICAO address
+    ADDR_TYPE_ADSB_OTHER,      // non-ICAO / self-assigned address
+    ADDR_TYPE_TISB_ICAO,       // DF18 TIS-B / ADS-R or UAT AQ2, ICAO
+    ADDR_TYPE_TISB_OTHER,      // DF18 TIS-B / ADS-R or UAT AQ3, track file
+    ADDR_TYPE_ADSB_VEHICLE,    // UAT AQ4, surface vehicle
+    ADDR_TYPE_FIXED_BEACON,    // UAT AQ5, fixed ADS-B beacon
 } traffic_addr_type_t;
 
 // Table capacity, shared with consumers that size snapshot buffers (gdl90_out,

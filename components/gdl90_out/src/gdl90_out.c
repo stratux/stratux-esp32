@@ -122,16 +122,17 @@ static void put_latlng(uint8_t *p, double deg)
 
 // traffic_addr_type_t is semantic, not wire format — map it to the GDL90 ICD
 // address-type value explicitly so reordering/extending the enum can't change
-// what goes on the wire. (The ICD has no "UAT" type: UAT targets are ADS-B
-// with ICAO address unless the UAT decoder classifies the address qualifier.)
+// what goes on the wire. (GDL90's table descends from the UAT MASPS, so the
+// DO-282 address qualifiers map 1:1; the UAT decoder classifies AQ per frame.)
 static uint8_t gdl90_addr_type(traffic_addr_type_t at)
 {
     switch (at) {
-    case ADDR_TYPE_ADSB_ICAO:  return 0;  // ADS-B with ICAO address
-    case ADDR_TYPE_ADSB_OTHER: return 1;  // ADS-B with self-assigned address
-    case ADDR_TYPE_TISB_ICAO:  return 2;  // TIS-B with ICAO address
-    case ADDR_TYPE_TISB_OTHER: return 3;  // TIS-B with track file ID
-    case ADDR_TYPE_UAT:        return 0;
+    case ADDR_TYPE_ADSB_ICAO:    return 0;  // ADS-B with ICAO address
+    case ADDR_TYPE_ADSB_OTHER:   return 1;  // ADS-B with self-assigned address
+    case ADDR_TYPE_TISB_ICAO:    return 2;  // TIS-B with ICAO address
+    case ADDR_TYPE_TISB_OTHER:   return 3;  // TIS-B with track file ID
+    case ADDR_TYPE_ADSB_VEHICLE: return 4;  // surface vehicle
+    case ADDR_TYPE_FIXED_BEACON: return 5;  // ground station beacon
     }
     return 0;
 }

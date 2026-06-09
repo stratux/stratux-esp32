@@ -12,7 +12,8 @@ void uat_decode_frame(const pong_frame_t *f)
     // TODO(M1): downlink decode. Outline (port from dump978 + uatparse):
     //   - hex -> bytes; identify SHORT (18 B) vs LONG (34 B) ADS-B message.
     //   - extract address, lat/lng, altitude, velocity, callsign, NIC/NACp.
-    //   - build traffic_info_t (addr_type = ADDR_TYPE_UAT) and traffic_upsert().
+    //   - build traffic_info_t (addr_type from the DO-282 address qualifier)
+    //     and traffic_upsert().
     // TODO(M5): uplink frames ('+') -> FIS-B products (wxstore) or 0x07 relay.
 
     g_status.uat_msgs++;
