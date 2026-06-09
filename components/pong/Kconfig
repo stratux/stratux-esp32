@@ -1,0 +1,36 @@
+menu "Pong input source"
+
+choice PONG_SOURCE
+    prompt "Pong frame source"
+    default PONG_SOURCE_RADIO
+    help
+        Where pong_rx_task reads demodulated Pong lines from.
+
+    config PONG_SOURCE_RADIO
+        bool "Real Pong radio (UART2 @ 3 Mbaud)"
+        help
+            Production: read the uAvionix Pong on UART2 (GPIO35 RX / GPIO33 TX)
+            at 3,000,000 baud, static RTS on GPIO32. See AGENTS.md.
+
+    config PONG_SOURCE_CONSOLE
+        bool "Replay over console USB (UART0) — dev harness"
+        help
+            Development: read Pong-format lines from the console UART (UART0,
+            the onboard USB-serial bridge) instead of the radio, so a host can
+            inject a recorded capture with tools/pong_replay.py over the single
+            USB cable. Firmware logs still go out on UART0 TX, which the replay
+            tool reads back. The onboard bridge is unreliable above ~115200
+            (AGENTS.md), so this path runs at PONG_CONSOLE_BAUD (default 115200),
+            NOT 3 Mbaud — fine for the ~3 KB/s real-time stream.
+endchoice
+
+config PONG_CONSOLE_BAUD
+    int "Pong console replay baud"
+    depends on PONG_SOURCE_CONSOLE
+    default 115200
+    help
+        Baud for the UART0 replay link. Keep at the console default (115200)
+        unless the USB-serial bridge is proven reliable higher. Must match the
+        --baud passed to tools/pong_replay.py.
+
+endmenu

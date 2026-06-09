@@ -1,7 +1,72 @@
 # tools/
 
-Dev/bring-up helpers. To be adapted from `connext-emulator/esp32/`.
-Placeholders / planned:
+Dev/bring-up helpers.
+
+## Pong capture / replay (host-side, Python)
+
+Timestamped-capture toolchain for recording and replaying Pong serial streams.
+Capture format (`pong_capture_format.py`): one record per line,
+`<epoch_ms> <raw Pong line>`, where `epoch_ms` is UTC milliseconds since the
+Unix epoch. `#` lines are comments. Replay/capture need **pyserial**
+(`pip install pyserial`); reconstruct is pure-stdlib.
+
+- **`pong_capture.py`** — read a live Pong over serial and write a timestamped
+  capture: `pong_capture.py -p <port> -o out.ponglog [--echo]`. Default port is
+  the TTGO bridge in AGENTS.md; baud defaults to 3,000,000.
+- **`pong_replay.py`** — the main debugging harness: inject a capture into the
+  board's Pong UART honoring inter-line timing scaled by `--rate` (`1.0`=real
+  time, `>1` faster, `<1` slower) **while concurrently reading the board's
+  serial output back** and printing both streams interleaved (`>` = injected,
+  `<` = read back, each with a relative timestamp).
+  `pong_replay.py out.ponglog --rate 1.0 -p <pong-uart> [--monitor-port <console>
+  --monitor-baud 115200] [--loop --max-gap S] [--echo] [--monitor-out log]`.
+  Monitoring defaults to the inject port (full-duplex); point `--monitor-port`
+  at the ESP32 console (UART0, 115200) to watch firmware logs. `--no-monitor`
+  disables reading; `--dry-run` prints injected lines without opening serial.
+- **`pong_reconstruct.py`** — synthesize timestamps for a legacy
+  un-timestamped `ponglog-*.log`. UAT uplink (FIS-B) frames embed UTC time
+  fields; `fisb_time.py` decodes them and RANSAC-fits line-number → wall-clock,
+  then lines are evenly spaced at the inferred rate (per-line jitter isn't
+  recoverable). For `ponglog-07062025.log` this infers ~48.5 lines/s over
+  ~22.3 min starting 2025-07-06 19:57:53 UTC. Override with `--rate` / `--date`
+  / `--start`.
+- **`fisb_time.py`** — FIS-B uplink time decoder + fit (ported/verified against
+  Stratux `uatparse/uatparse.go`); imported by reconstruct.
+
+### Firmware dev mode — replay over the single USB cable
+
+The onboard USB-serial bridge can't do 3 Mbaud (AGENTS.md: flashing is flaky
+above 115200), so don't inject the real-radio baud over USB. Instead build the
+firmware to read Pong frames from the **console UART0** at 115200:
+
+```bash
+idf.py menuconfig        # Pong input source -> "Replay over console USB (UART0)"
+# or: echo 'CONFIG_PONG_SOURCE_CONSOLE=y' >> sdkconfig
+idf.py -B build-wifi build flash       # then run the harness below (NOT idf.py monitor)
+```
+
+In this mode the firmware ingests injected lines on UART0 RX and still logs on
+UART0 TX, so one cable does both. The ~3 KB/s real-time stream fits 115200 with
+headroom; only `--rate` past ~3-4x would saturate it. Production builds leave
+the source on the real radio (UART2 @ 3 Mbaud) — the default.
+
+`pong_replay.py` deasserts DTR/RTS and pulses the board's auto-reset into run
+mode on start, so it never falls into the silent ROM download mode and you
+capture a fresh boot log each run (the ESP32's USB bridge wires DTR/RTS to
+GPIO0/EN — opening a port carelessly otherwise resets it into the bootloader
+and you see *no output*). Use `--no-reset` to leave a running board alone, and
+`--boot-wait SEC` to tune the post-reset settle before injection starts.
+
+Example end-to-end: reconstruct the bundled log and stream it to a board in
+real time over the single USB cable, watching firmware logs interleaved:
+
+```bash
+python3 tools/pong_reconstruct.py ponglog-07062025.log -o /tmp/cap.ponglog
+python3 tools/pong_replay.py /tmp/cap.ponglog --rate 1.0 \
+    -p /dev/cu.usbserial-5C8C0111211        # replay defaults to 115200
+```
+
+## Planned (to be adapted from `connext-emulator/esp32/`)
 
 - **flash/monitor** — wrappers around `idf.py -b 115200 flash monitor` (the
   USB-serial bridge is unreliable above 115200 — see AGENTS.md "Gotchas").

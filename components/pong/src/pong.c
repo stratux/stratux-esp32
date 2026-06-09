@@ -1,5 +1,6 @@
 #include "pong.h"
 #include <string.h>
+#include "sdkconfig.h"
 #include "driver/uart.h"
 #include "driver/gpio.h"
 #include "esp_log.h"
@@ -10,6 +11,19 @@
 #include "uat.h"
 
 static const char *TAG = "pong";
+
+// Pong frame source (see components/pong/Kconfig). Default is the real radio on
+// UART2 @ 3 Mbaud. CONFIG_PONG_SOURCE_CONSOLE instead reads Pong-format lines
+// from the console UART0 (onboard USB bridge) so a host can inject a recorded
+// capture with tools/pong_replay.py over the single USB cable — the bridge is
+// unreliable above ~115200 (AGENTS.md), so that path runs at a lower baud.
+#if CONFIG_PONG_SOURCE_CONSOLE
+#define PONG_ACTIVE_PORT  UART_NUM_0
+#define PONG_ACTIVE_BAUD  CONFIG_PONG_CONSOLE_BAUD
+#else
+#define PONG_ACTIVE_PORT  PONG_UART_PORT
+#define PONG_ACTIVE_BAUD  PONG_UART_BAUD
+#endif
 
 #define PONG_RX_BUF   (4 * 1024)   // 3 Mbaud is bursty; give the driver headroom
 // Must hold the longest Pong line. UAT uplink (FIS-B) frames reach 877 chars in
@@ -74,31 +88,41 @@ void pong_rx_task(void *arg)
 {
     (void)arg;
 
-    // UART2 @ 3 Mbaud, 8N1. Stratux clears RTS once and never toggles it, with
-    // no CTS — so we do NOT use UART_HW_FLOWCTRL_RTS. Drive GPIO32 as a static
-    // level instead. Only switch to hardware RTS if bench
-    // testing proves the Pong actually pauses/resumes on it. Keep RTS/TX off
-    // GPIO16/17 (PSRAM data, Bug B).
+    // 8N1, no HW flow control (Stratux clears RTS once and never toggles it,
+    // with no CTS). Baud/port depend on the source: real radio = UART2 @ 3
+    // Mbaud; console replay = UART0 @ PONG_CONSOLE_BAUD.
     uart_config_t cfg = {
-        .baud_rate  = PONG_UART_BAUD,
+        .baud_rate  = PONG_ACTIVE_BAUD,
         .data_bits  = UART_DATA_8_BITS,
         .parity     = UART_PARITY_DISABLE,
         .stop_bits  = UART_STOP_BITS_1,
         .flow_ctrl  = UART_HW_FLOWCTRL_DISABLE,
         .source_clk = UART_SCLK_DEFAULT,
     };
-    ESP_ERROR_CHECK(uart_driver_install(PONG_UART_PORT, PONG_RX_BUF, 0, 0, NULL, 0));
-    ESP_ERROR_CHECK(uart_param_config(PONG_UART_PORT, &cfg));
+
+    // The console driver may already own UART0 for logging; only install if not.
+    if (!uart_is_driver_installed(PONG_ACTIVE_PORT)) {
+        ESP_ERROR_CHECK(uart_driver_install(PONG_ACTIVE_PORT, PONG_RX_BUF, 0, 0, NULL, 0));
+    }
+    ESP_ERROR_CHECK(uart_param_config(PONG_ACTIVE_PORT, &cfg));
+
+#if !CONFIG_PONG_SOURCE_CONSOLE
+    // Real radio: route UART2 to the Pong pins and hold RTS at the static
+    // ClearRTS level on GPIO32. Keep RTS/TX off GPIO16/17 (PSRAM data, Bug B).
+    // Only switch to hardware RTS if bench testing proves the Pong actually
+    // pauses/resumes on it. TODO(bring-up): confirm the RTS polarity on real HW.
     ESP_ERROR_CHECK(uart_set_pin(PONG_UART_PORT, PONG_TX_GPIO, PONG_RX_GPIO,
                                  UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
-
-    // RTS as a static GPIO level (ClearRTS equivalent). TODO(bring-up): confirm
-    // the polarity the Pong expects on real hardware.
     gpio_set_direction(PONG_RTS_GPIO, GPIO_MODE_OUTPUT);
     gpio_set_level(PONG_RTS_GPIO, 0);
-
-    ESP_LOGI(TAG, "Pong UART%d up @ %d baud (RX=%d TX=%d RTS=%d)",
-             PONG_UART_PORT, PONG_UART_BAUD, PONG_RX_GPIO, PONG_TX_GPIO, PONG_RTS_GPIO);
+    ESP_LOGI(TAG, "Pong source: radio on UART%d @ %d baud (RX=%d TX=%d RTS=%d)",
+             PONG_ACTIVE_PORT, PONG_ACTIVE_BAUD, PONG_RX_GPIO, PONG_TX_GPIO, PONG_RTS_GPIO);
+#else
+    // Console replay: UART0 keeps its existing GPIO1/3 console pins; do NOT call
+    // uart_set_pin or touch the RTS GPIO. Logs still flow out on UART0 TX.
+    ESP_LOGW(TAG, "Pong source: CONSOLE replay on UART%d @ %d baud (dev harness, "
+                  "not the real radio)", PONG_ACTIVE_PORT, PONG_ACTIVE_BAUD);
+#endif
 
     static char line[PONG_LINE_MAX];
     size_t len = 0;
@@ -107,7 +131,7 @@ void pong_rx_task(void *arg)
     for (;;) {
         // TODO(M1): batch reads (uart_read_bytes into a chunk) for 3 Mbaud
         // throughput; byte-at-a-time here is just the readable skeleton form.
-        int n = uart_read_bytes(PONG_UART_PORT, &byte, 1, portMAX_DELAY);
+        int n = uart_read_bytes(PONG_ACTIVE_PORT, &byte, 1, portMAX_DELAY);
         if (n != 1) continue;
 
         if (byte == '\n' || byte == '\r') {
