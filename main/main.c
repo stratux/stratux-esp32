@@ -10,6 +10,7 @@
 #include "net.h"
 #include "gdl90_out.h"
 #include "traffic.h"
+#include "modes.h"
 #include "pong.h"
 #include "web.h"
 
@@ -28,6 +29,7 @@ void app_main(void)
     net_wifi_softap_start();     // SSID "stratux", 192.168.10.1, UDP :4000 sink
     gdl90_out_init();            // CRC self-test + HDLC/CRC framer
     traffic_init();              // table + mutex
+    modes_init();                // Mode-S CRC table + ICAO address filter
 
     // Worker tasks (Go goroutine -> FreeRTOS task; see AGENTS.md task map).
     xTaskCreate(pong_rx_task,     "pong_rx",     4096, NULL, 10, NULL);

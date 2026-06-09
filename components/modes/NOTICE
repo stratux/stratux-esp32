@@ -1,0 +1,45 @@
+stratux-esp32 — components/modes NOTICE
+=======================================
+
+The 1090ES Mode-S decoder in this component is derived from dump1090
+(the FlightAware fork), which is licensed under the GNU General Public
+License, version 2 or (at your option) any later version.
+
+  Copyright (c) 2014-2016 Oliver Jowett <oliver@mutability.co.uk>
+  Copyright (c) 2017-2021 FlightAware, LLC
+  Portions Copyright (C) 2012 Salvatore Sanfilippo <antirez@gmail.com> (BSD)
+
+Because this code is statically linked into the firmware image, the
+firmware as a whole is a derivative work and is distributed under the
+GPLv2-or-later. See <https://www.gnu.org/licenses/>.
+
+Files in this component and their provenance:
+
+  src/crc.c, src/crc.h
+      Vendored verbatim from dump1090 crc.{c,h}. Mode-S 24-bit CRC and
+      (unused here) error-correction syndrome tables. Original include of
+      "dump1090.h" replaced with self-contained definitions; otherwise
+      unchanged.
+
+  src/cpr.c, src/cpr.h
+      Vendored verbatim from dump1090 cpr.{c,h}. Compact Position Reporting
+      (CPR) airborne/surface/relative decode + the NL latitude-zone table.
+
+  src/ais_charset.c, src/ais_charset.h
+      Vendored verbatim from dump1090. 6-bit AIS character set used for
+      callsign (TC 1-4) decode.
+
+  src/mode_s_decode.c, src/mode_s_decode.h
+      Ported (not verbatim) from dump1090 mode_s.c. The getbit/getbits
+      helpers are copied verbatim from mode_s.h. The Extended-Squitter
+      decoders (ident TC1-4, surface TC5-8, airborne position TC9-22,
+      velocity TC19, operational status TC31) and the DF routing in
+      decodeModesMessage are reimplemented onto a slim ms_msg_t struct,
+      keeping the original field-extraction math. The DSP front-end,
+      message scoring, brute-force error correction, comm-b, MRAR, nav,
+      and the SDR/threading layers are intentionally not ported — the
+      Pong delivers already-demodulated, FEC-corrected frames.
+
+  src/cpr_store.c
+      Stratux-esp32 original. Per-ICAO even/odd CPR staging with expiry,
+      driving the vendored cpr.c global/relative decoders.

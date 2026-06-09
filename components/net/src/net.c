@@ -16,6 +16,7 @@ static const char *TAG = "net";
 
 static int               s_udp_sock = -1;
 static SemaphoreHandle_t s_lease_mux;
+static esp_netif_t      *s_ap_netif;   // SoftAP handle, for DHCP lease lookups
 
 // EFB "lease table": one entry per associated station the SoftAP's DHCP server
 // has handed an address. This is the ESP32 equivalent of Stratux's
@@ -87,6 +88,7 @@ void net_wifi_softap_start(void)
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
     esp_netif_t *ap = esp_netif_create_default_wifi_ap();
+    s_ap_netif = ap;
 
     // Pin the AP to 192.168.10.1/24 so the gateway matches Stratux defaults and
     // DHCP leases land on the subnet EFBs expect. Stop the default DHCP server,
@@ -144,19 +146,62 @@ int net_client_count(void)
     return 0;
 }
 
+// Build the set of GDL90 unicast destinations (network-byte-order IPs, deduped).
+//
+// Two sources, unioned: (1) our event cache, populated when STAIPASSIGNED fires;
+// (2) the SoftAP DHCP server's live bindings for every currently-associated
+// station, resolved via esp_netif_dhcps_get_clients_by_mac() (the ESP-IDF analog
+// of Stratux getDHCPLeases()). Polling the server each send is more robust than
+// the event cache alone: it survives missed events and lease renewals, and stays
+// strictly unicast. (Caveat: after an ESP32 reboot the server's lease memory is
+// also lost, so a client that keeps its cached IP without re-DHCPing won't be
+// resolvable until it renews.)
+static int collect_dest_ips(uint32_t *ips, int cap)
+{
+    int n = 0;
+    #define ADD_IP(addr) do { \
+        uint32_t _a = (addr); \
+        if (_a) { int _dup = 0; \
+            for (int _j = 0; _j < n; _j++) if (ips[_j] == _a) { _dup = 1; break; } \
+            if (!_dup && n < cap) ips[n++] = _a; } \
+    } while (0)
+
+    if (s_lease_mux) {
+        xSemaphoreTake(s_lease_mux, portMAX_DELAY);
+        for (int i = 0; i < MAX_CLIENTS; i++)
+            if (s_leases[i].used) ADD_IP(s_leases[i].ip);
+        xSemaphoreGive(s_lease_mux);
+    }
+
+    wifi_sta_list_t sta;
+    if (s_ap_netif && esp_wifi_ap_get_sta_list(&sta) == ESP_OK && sta.num > 0) {
+        int m = sta.num < MAX_CLIENTS ? sta.num : MAX_CLIENTS;
+        esp_netif_pair_mac_ip_t pairs[MAX_CLIENTS];
+        memset(pairs, 0, sizeof(pairs));
+        for (int i = 0; i < m; i++)
+            memcpy(pairs[i].mac, sta.sta[i].mac, 6);
+        if (esp_netif_dhcps_get_clients_by_mac(s_ap_netif, m, pairs) == ESP_OK) {
+            for (int i = 0; i < m; i++)
+                ADD_IP(pairs[i].ip.addr);
+        }
+    }
+
+    #undef ADD_IP
+    return n;
+}
+
+int net_lease_count(void)
+{
+    uint32_t ips[MAX_CLIENTS];
+    return collect_dest_ips(ips, MAX_CLIENTS);
+}
+
 void net_gdl90_send(const uint8_t *datagram, size_t len)
 {
     if (s_udp_sock < 0 || !datagram || !len) return;
 
-    // Snapshot lease IPs under the lock, then send outside it (a UDP sendto can
-    // block briefly in lwIP; don't hold the lease mutex across it).
     uint32_t ips[MAX_CLIENTS];
-    int n = 0;
-    xSemaphoreTake(s_lease_mux, portMAX_DELAY);
-    for (int i = 0; i < MAX_CLIENTS; i++) {
-        if (s_leases[i].used) ips[n++] = s_leases[i].ip;
-    }
-    xSemaphoreGive(s_lease_mux);
+    int n = collect_dest_ips(ips, MAX_CLIENTS);
 
     struct sockaddr_in dst;
     memset(&dst, 0, sizeof(dst));

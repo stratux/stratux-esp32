@@ -99,6 +99,126 @@ static size_t build_heartbeat(uint8_t *p)
     return 7;
 }
 
+// Build the 2-byte Stratux custom heartbeat (0xCC). Layout per Stratux
+// gen_gdl90.go makeStratuxHeartbeat: bit1 = GPS valid (M3), bit0 = AHRS valid
+// (M4) — both clear now; protocol version (1) sits in bits 2+.
+static size_t build_stratux_heartbeat(uint8_t *p)
+{
+    p[0] = GDL90_MSG_STRATUX_HB;
+    p[1] = (uint8_t)(1 << 2);   // protocol version 1; GPS/AHRS bits clear
+    return 2;
+}
+
+// GDL90 lat/lon are 24-bit signed semicircles: degrees / (180 / 2^23).
+#define GDL90_LATLNG_RES (180.0 / 8388608.0)
+
+static void put_latlng(uint8_t *p, double deg)
+{
+    int32_t wk = (int32_t)(deg / GDL90_LATLNG_RES);
+    p[0] = (uint8_t)((wk >> 16) & 0xFF);
+    p[1] = (uint8_t)((wk >> 8) & 0xFF);
+    p[2] = (uint8_t)(wk & 0xFF);
+}
+
+// traffic_addr_type_t is semantic, not wire format — map it to the GDL90 ICD
+// address-type value explicitly so reordering/extending the enum can't change
+// what goes on the wire. (The ICD has no "UAT" type: UAT targets are ADS-B
+// with ICAO address unless the UAT decoder classifies the address qualifier.)
+static uint8_t gdl90_addr_type(traffic_addr_type_t at)
+{
+    switch (at) {
+    case ADDR_TYPE_ADSB_ICAO:  return 0;  // ADS-B with ICAO address
+    case ADDR_TYPE_ADSB_OTHER: return 1;  // ADS-B with self-assigned address
+    case ADDR_TYPE_TISB_ICAO:  return 2;  // TIS-B with ICAO address
+    case ADDR_TYPE_TISB_OTHER: return 3;  // TIS-B with track file ID
+    case ADDR_TYPE_UAT:        return 0;
+    }
+    return 0;
+}
+
+// Build the 28-byte GDL90 Traffic Report (0x14). Byte layout ported verbatim
+// from Stratux gen_gdl90.go makeTrafficReportMsg (the reference EFBs trust).
+// Caller must only pass entries with a valid position.
+static size_t build_traffic_report(uint8_t *p, const traffic_info_t *t)
+{
+    memset(p, 0, 28);
+    p[0] = GDL90_MSG_TRAFFIC;
+
+    // msg[1]: address type (low nibble). The alert bit (0x10) needs ownship
+    // proximity logic — deferred to M3, left clear.
+    p[1] = gdl90_addr_type(t->addr_type);
+
+    // ICAO address.
+    p[2] = (uint8_t)((t->icao_addr >> 16) & 0xFF);
+    p[3] = (uint8_t)((t->icao_addr >> 8) & 0xFF);
+    p[4] = (uint8_t)(t->icao_addr & 0xFF);
+
+    // Latitude / longitude.
+    put_latlng(&p[5], t->lat);
+    put_latlng(&p[8], t->lng);
+
+    // Altitude: 25 ft resolution, 1000 ft offset; 0xFFF = invalid/unavailable.
+    int16_t encodedAlt;
+    if (!t->alt_valid || t->alt_ft < -1000 || t->alt_ft > 101350)
+        encodedAlt = 0x0FFF;
+    else
+        encodedAlt = (int16_t)((t->alt_ft / 25) + 40);
+    p[11] = (uint8_t)((encodedAlt & 0x0FF0) >> 4);
+    p[12] = (uint8_t)((encodedAlt & 0x000F) << 4);
+
+    // "m" nibble: track validity, extrapolated, airborne.
+    if (t->speed_valid)   p[12] |= 0x01;   // tt is true track
+    if (t->extrapolated)  p[12] |= 0x04;   // report is extrapolated
+    if (!t->on_ground)    p[12] |= 0x08;   // airborne
+
+    // NIC / NACp. NACp arrives only in TC31 operational-status frames; when
+    // none has been seen, seed it from NIC (Stratux does the same) instead of
+    // reporting "unknown accuracy" for an aircraft with a good position.
+    uint8_t nic  = t->nic_valid ? t->nic : 0;
+    uint8_t nacp = t->nacp_valid ? t->nacp : nic;
+    p[13] = (uint8_t)(((nic << 4) & 0xF0) | (nacp & 0x0F));
+
+    // Horizontal velocity (12 bits): 0xFFF = no data.
+    uint16_t spd = t->speed_valid ? (t->speed_kt > 0xFFE ? 0xFFE : t->speed_kt) : 0x0FFF;
+    p[14] = (uint8_t)((spd & 0x0FF0) >> 4);
+    p[15] = (uint8_t)((spd & 0x000F) << 4);
+
+    // Vertical velocity (12-bit signed, 64 fpm units): 0x800 = no data.
+    uint16_t vv;
+    if (t->vvel_valid) {
+        int v = t->vvel_fpm / 64;
+        vv = (uint16_t)(v & 0x0FFF);
+    } else {
+        vv = 0x0800;
+    }
+    p[15] |= (uint8_t)((vv & 0x0F00) >> 8);
+    p[16] = (uint8_t)(vv & 0x00FF);
+
+    // Track / heading (8-bit, 360/256 deg resolution).
+    p[17] = (uint8_t)(((int)t->track_deg * 256) / 360);
+
+    // Emitter category.
+    p[18] = t->cat_valid ? t->emitter_cat : 0;
+
+    // Call sign / tail (msg[19..26]), sanitized to the GDL90 charset.
+    size_t taillen = t->tail_valid ? strlen(t->tail) : 0;
+    for (int i = 0; i < 8; i++) {
+        char c = (i < (int)taillen) ? t->tail[i] : ' ';
+        if (c != ' ' && !(c >= '0' && c <= '9') && !(c >= 'A' && c <= 'Z'))
+            c = ' ';
+        p[19 + i] = (uint8_t)c;
+    }
+
+    // msg[27]: priority / emergency status (M1: none).
+    p[27] = 0;
+    return 28;
+}
+
+// Bounded snapshot buffer (static — too large for the task stack). Sized from
+// the table capacity so tuning TRAFFIC_TABLE_MAX can't silently truncate; we
+// report all positioned entries each cycle.
+static traffic_info_t s_snap[TRAFFIC_TABLE_MAX];
+
 void gdl90_emit_task(void *arg)
 {
     (void)arg;
@@ -110,20 +230,50 @@ void gdl90_emit_task(void *arg)
     uint8_t frame[1024];
 
     TickType_t last_hb = xTaskGetTickCount();
+    TickType_t last_diag = last_hb;
 
     for (;;) {
         TickType_t now = xTaskGetTickCount();
 
-        // 1 Hz heartbeat (0x00). M1 adds the Stratux 0xCC status here too.
+        // 1 Hz: heartbeat (0x00), Stratux status (0xCC), and one Traffic Report
+        // (0x14) per positioned target.
         if (now - last_hb >= pdMS_TO_TICKS(1000)) {
+            int flen;
+            size_t positioned = 0;
+
             size_t plen = build_heartbeat(payload);
-            int flen = gdl90_frame(payload, plen, frame, sizeof(frame));
+            flen = gdl90_frame(payload, plen, frame, sizeof(frame));
             if (flen > 0) net_gdl90_send(frame, (size_t)flen);
+
+            plen = build_stratux_heartbeat(payload);
+            flen = gdl90_frame(payload, plen, frame, sizeof(frame));
+            if (flen > 0) net_gdl90_send(frame, (size_t)flen);
+
+            size_t n = traffic_snapshot(s_snap, TRAFFIC_TABLE_MAX);
+            for (size_t i = 0; i < n; i++) {
+                // Position required to plot; traffic_mgr clears position_valid
+                // once a fix is stale and no longer being extrapolated, so a
+                // frozen position is never re-broadcast as current.
+                if (!s_snap[i].position_valid)
+                    continue;
+                positioned++;
+                plen = build_traffic_report(payload, &s_snap[i]);
+                flen = gdl90_frame(payload, plen, frame, sizeof(frame));
+                if (flen > 0) net_gdl90_send(frame, (size_t)flen);
+            }
+
+            // Diagnostic heartbeat every ~5 s: confirms the emitter is alive and
+            // shows whether frames are decoding (es_msgs), populating the table,
+            // and — critically — whether any EFB lease exists to unicast to.
+            if (now - last_diag >= pdMS_TO_TICKS(5000)) {
+                ESP_LOGI(TAG, "emit: es_msgs=%lu table=%u positioned=%u assoc=%d leases=%d",
+                         (unsigned long)g_status.es_msgs, (unsigned)n,
+                         (unsigned)positioned, net_client_count(), net_lease_count());
+                last_diag = now;
+            }
+
             last_hb = now;
         }
-
-        // TODO(M1): traffic_snapshot() -> build a 0x14 Traffic Report per entry
-        // (gen_gdl90.go makeTrafficReport field layout) -> frame -> send.
 
         vTaskDelay(pdMS_TO_TICKS(100));
     }

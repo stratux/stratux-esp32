@@ -13,9 +13,10 @@ static esp_err_t status_get(httpd_req_t *req)
     char buf[256];
     int n = snprintf(buf, sizeof buf,
         "{\"version\":\"%s\",\"pong\":%d,\"utc_ok\":%d,"
-        "\"es\":%u,\"uat\":%u,\"pong_err\":%u,\"clients\":%d}",
+        "\"es\":%u,\"es_rej\":%u,\"uat\":%u,\"pong_err\":%u,\"clients\":%d}",
         STRATUX_ESP32_VERSION, g_status.pong_connected, g_status.utc_ok,
-        (unsigned)g_status.es_msgs, (unsigned)g_status.uat_msgs,
+        (unsigned)g_status.es_msgs, (unsigned)g_status.es_rejected,
+        (unsigned)g_status.uat_msgs,
         (unsigned)g_status.pong_errors, net_client_count());
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_send(req, buf, n);

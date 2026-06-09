@@ -1,5 +1,6 @@
 #include "pong.h"
 #include <string.h>
+#include <stdlib.h>
 #include "sdkconfig.h"
 #include "driver/uart.h"
 #include "driver/gpio.h"
@@ -63,14 +64,30 @@ static void handle_line(char *line)
             }
             return;
 
-        case PONG_LINE_1090ES:
-            // TODO(M1): copy hex (between '*' and the first ';') into
-            //   f.hex/f.hex_len. The "ss=" field is OPTIONAL on 1090ES lines:
-            //   only set f.ss/f.ss_valid if a literal "ss=" is found (HEX).
-            //   Do NOT treat the trailing ";<n>" some firmware emits as ss —
-            //   that is a message counter. Like Stratux, key off report[0].
+        case PONG_LINE_1090ES: {
+            // The hex frame is everything between '*' and the first ';'
+            // (e.g. *8DC01C2860C37797E9732E555B23;ss=049D;). Like Stratux, we
+            // key off that first field and ignore the rest.
+            const char *body = line + 1;
+            const char *semi = strchr(body, ';');
+            size_t hlen = semi ? (size_t)(semi - body) : strlen(body);
+            if (hlen >= PONG_HEX_MAX) hlen = PONG_HEX_MAX - 1;
+            memcpy(f.hex, body, hlen);
+            f.hex[hlen] = '\0';
+            f.hex_len = (uint16_t)hlen;
+
+            // "ss=" is OPTIONAL on 1090ES lines and is a HEX log-detector
+            // reading. Only set it if a literal "ss=" field is present; never
+            // treat a trailing ";<n>" message counter as signal strength.
+            const char *ss = strstr(line, "ss=");
+            if (ss) {
+                f.ss = (uint16_t)strtoul(ss + 3, NULL, 16);
+                f.ss_valid = 1;
+            }
+
             if (g_settings.es_en) modes_decode_frame(&f);
             return;
+        }
 
         case PONG_LINE_UAT_DOWN:
         case PONG_LINE_UAT_UP:

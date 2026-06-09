@@ -12,6 +12,9 @@ void net_wifi_softap_start(void);
 // Count of currently-associated SoftAP stations (for /getStatus).
 int net_client_count(void);
 
+// Count of active EFB DHCP leases (the actual GDL90 unicast destinations).
+int net_lease_count(void);
+
 // Send one GDL90 datagram, unicast, to every EFB client on UDP :4000.
 //
 // Delivery mirrors Stratux (network.go): the SoftAP's DHCP server is the lease

@@ -13,6 +13,10 @@
 // (Stratux's traffic path assumes dump1090-decoded fields). Confirm licensing
 // before vendoring (see AGENTS.md "Conventions" — licensing).
 
+// Build the Mode-S CRC table and clear the ICAO address filter. Call once from
+// app_main before starting pong_rx_task.
+void modes_init(void);
+
 // Decode one '*' 1090ES frame and traffic_upsert() the result. Called by the
 // pong task (synchronously) for each classified 1090ES line.
 void modes_decode_frame(const pong_frame_t *f);

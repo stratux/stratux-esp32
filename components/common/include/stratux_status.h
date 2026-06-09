@@ -12,6 +12,8 @@
 typedef struct {
     bool     pong_connected;   // Pong heartbeat/frame seen within the link timeout
     uint32_t es_msgs;          // 1090ES frames decoded since boot
+    uint32_t es_rejected;      // 1090ES frames rejected (CRC fail / unknown DF) —
+                               // distinguishes a degraded RF path from empty air
     uint32_t uat_msgs;         // UAT frames decoded since boot
     uint32_t pong_errors;      // "ERROR SPI" + line-parse failures
     bool     utc_ok;           // real time source acquired (GPS/NTP/manual) — false until M3

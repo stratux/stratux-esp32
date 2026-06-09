@@ -8,13 +8,19 @@
 // traffic_upsert(); traffic_mgr_task ages/extrapolates; gdl90_emit + the web UI
 // read snapshots. See AGENTS.md (architecture & task map).
 
+// Semantic address source. NOT a wire format: gdl90_out maps these to the
+// GDL90 address-type nibble explicitly (the ICD has no "UAT" address type).
 typedef enum {
     ADDR_TYPE_ADSB_ICAO = 0,   // DF17 / ES with ICAO address
     ADDR_TYPE_ADSB_OTHER,      // non-ICAO address
-    ADDR_TYPE_TISB_ICAO,       // DF18 TIS-B, ICAO
+    ADDR_TYPE_TISB_ICAO,       // DF18 TIS-B / ADS-R, ICAO
     ADDR_TYPE_TISB_OTHER,      // DF18 TIS-B / ADS-R, non-ICAO
     ADDR_TYPE_UAT,             // 978 UAT downlink
 } traffic_addr_type_t;
+
+// Table capacity, shared with consumers that size snapshot buffers (gdl90_out,
+// web UI). ~300 * sizeof(traffic_info_t) (~30 KB) comfortably fits internal RAM.
+#define TRAFFIC_TABLE_MAX 300
 
 typedef struct {
     uint32_t            icao_addr;      // 24-bit address (ICAO or non-ICAO)
@@ -32,9 +38,32 @@ typedef struct {
     int16_t             vvel_fpm;       // vertical rate, ft/min
 
     uint8_t             nic, nacp;      // integrity / accuracy
+    uint8_t             emitter_cat;    // GDL90 emitter category (0-39; TC 1-4)
     uint16_t            ss;             // last signal strength (raw Pong hex reading)
 
-    int64_t             last_seen_ms;   // esp_timer ms at last update
+    int64_t             last_seen_ms;   // esp_timer ms at last update (any frame)
+    int64_t             position_ms;    // esp_timer ms of the last real position
+                                        // fix — NOT refreshed by non-position
+                                        // frames; anchors extrapolation/staleness
+
+    // Per-field validity. A single 1090ES frame carries only some of the state
+    // (a velocity message has no altitude, a position message no callsign, …),
+    // so the decoder sets only the flags for fields it actually populated and
+    // traffic_upsert() merges field-by-field instead of clobbering. On a stored
+    // entry, a flag means "this field has been seen at least once".
+    bool                alt_valid;
+    bool                gnss_alt_valid;
+    bool                speed_valid;     // track_deg + speed_kt
+    bool                vvel_valid;
+    bool                tail_valid;
+    bool                cat_valid;
+    bool                nic_valid;       // NIC ships with every position report
+    bool                nacp_valid;      // NACp only with TC31 operational status
+    bool                airground_valid; // on_ground is meaningful
+    bool                ss_valid;
+
+    bool                extrapolated;    // position was dead-reckoned by traffic_mgr
+    int64_t             extrap_ms;       // time of last extrapolation step (0 = none)
     // CPR even/odd staging is decoder-owned (see modes/); not exposed here.
 } traffic_info_t;
 
@@ -42,11 +71,15 @@ typedef struct {
 void traffic_init(void);
 
 // Insert or merge a decoded report (decoders call this under no lock; the
-// function takes the table mutex internally). Cross-band dedup is M2.
+// function takes the table mutex internally). Entries are keyed by ICAO within
+// the ICAO-addressed class (so DF17 and a TIS-B/ADS-R rebroadcast of the same
+// aircraft merge into one entry); non-ICAO/self-assigned addresses key
+// separately. Cross-band (1090/978) dedup is M2.
 void traffic_upsert(const traffic_info_t *t);
 
-// FreeRTOS task (~10 Hz, Stratux sendTrafficUpdates): extrapolate dead-reckoned
-// positions, age out stale entries, compute bearing/distance from ownship.
+// FreeRTOS task (1 Hz, Stratux sendTrafficUpdates): extrapolate dead-reckoned
+// positions, demote stale positions, age out stale entries, compute
+// bearing/distance from ownship (M3).
 void traffic_mgr_task(void *arg);
 
 // Copy up to `max` live entries into `out`; returns the count written. Takes
