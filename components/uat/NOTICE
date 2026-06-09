@@ -1,0 +1,26 @@
+stratux-esp32 — components/uat NOTICE
+=====================================
+
+The 978 UAT downlink decoder in this component is derived from dump978,
+which is licensed under the GNU General Public License, version 2 or
+(at your option) any later version.
+
+  Copyright 2015, Oliver Jowett <oliver@mutability.co.uk>
+
+Because this code is statically linked into the firmware image, the
+firmware as a whole is a derivative work and is distributed under the
+GPLv2-or-later. See <https://www.gnu.org/licenses/>.
+
+Files in this component and their provenance:
+
+  src/uat_decode.c, src/uat_decode.h
+      Vendored from dump978 uat_decode.{c,h}. The ADS-B MDB decode path
+      (uat_decode_hdr/sv/ms/auxsv, uat_decode_adsb_mdb, the base40
+      alphabet and dimension-width table) is verbatim except for const
+      frame parameters. The display functions, name string tables, the
+      uplink/FIS-B decode path (M5), and the stdio dependency are not
+      ported. uat_hex_to_bytes() is a stratux-esp32 addition.
+
+  src/uat.c
+      Stratux-esp32 original. Pong-frame integration: hex/length gating
+      and the uat_adsb_mdb -> traffic_info_t mapping.
