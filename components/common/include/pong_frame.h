@@ -18,7 +18,10 @@ typedef enum {
     PONG_LINE_1090ES,    // '*'  Mode-S frame (AVR/hex); optional trailing ss=
     PONG_LINE_UAT_DOWN,  // '-'  978 UAT downlink + rs=/ss=
     PONG_LINE_UAT_UP,    // '+'  978 UAT uplink   + rs=/ss=
-    PONG_LINE_HEARTBEAT, // '.'  heartbeat (Pong does NOT heartbeat-timeout)
+    PONG_LINE_HEARTBEAT, // '.'  idle-only heartbeat: sent ONLY when no message
+                         //      went out in the 5 s heartbeat period — absent
+                         //      while traffic flows, so liveness must key on
+                         //      any line, never on '.' alone
     PONG_LINE_STATUS,    // '\'' quoted ASCII status text
     PONG_LINE_LOG,       // other ASCII; may contain "ERROR SPI" (Pong fault)
 } pong_line_kind_t;

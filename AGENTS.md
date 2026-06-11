@@ -149,6 +149,11 @@ pins 34–39 have no internal pulls.
 **Pong serial link** (Stratux `main/pong.go`): 3,000,000 baud, 8N1.
 Newline-delimited ASCII; first char classifies: `*`=1090ES, `-`=UAT downlink,
 `+`=UAT uplink, `.`=heartbeat, `'`=status, other=log (may contain `ERROR SPI`).
+- **The `.` heartbeat is idle-only**: the Pong sends it only when no message
+  went out in the 5 s heartbeat period, so it disappears while traffic flows.
+  Link liveness must key on **any** line (frames included) with a silence
+  timeout longer than the heartbeat period — an alive Pong says something at
+  least every ~5 s. Never wait for `.` specifically.
 - Host **clears RTS once** and never toggles it; there is **no CTS / flow
   control**. Drive GPIO32 as a static level — do not enable `UART_HW_FLOWCTRL_RTS`
   unless bench testing proves the Pong pauses/resumes on it.

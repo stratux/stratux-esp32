@@ -22,7 +22,7 @@ Usage:
     pong_replay.py cap.ponglog -p <pong-uart> --monitor-port <console> --monitor-baud 115200
     pong_replay.py cap.ponglog --no-monitor --rate 5               # inject only
     pong_replay.py cap.ponglog --dry-run                           # print, no serial
-    pong_replay.py cap.ponglog --heartbeat                         # phantom '.' @ 1 Hz
+    pong_replay.py cap.ponglog --heartbeat             # idle-only '.' after 5 s of silence
 
 Requires pyserial (`pip install pyserial`).
 """
@@ -35,7 +35,9 @@ from pong_capture_format import DEFAULT_PORT, format_record, parse_record
 
 _print_lock = threading.Lock()
 _tx_lock = threading.Lock()   # serialize line writes (replay vs heartbeat thread)
-_t0 = None   # monotonic start, set in main()
+_t0 = None         # monotonic start, set in main()
+_last_tx = 0.0     # monotonic time of the last line sent (any kind); the
+                   # heartbeat keys off this to mimic the Pong's idle-only beacon
 
 
 def _emit(direction, text):
@@ -73,12 +75,18 @@ def main():
     ap.add_argument("--loop", action="store_true", help="replay forever")
     ap.add_argument("--eol", default="crlf", choices=["crlf", "lf", "none"],
                     help="line terminator to send (default crlf)")
-    ap.add_argument("--heartbeat", nargs="?", type=float, const=1.0, default=None,
+    ap.add_argument("--heartbeat", nargs="?", type=float, const=5.0, default=None,
                     metavar="SEC",
-                    help="also inject a phantom Pong heartbeat ('.') line every "
-                         "SEC seconds (default off; SEC defaults to 1.0). The "
-                         "firmware marks the Pong link up only on heartbeat "
-                         "lines, which raw captures lack")
+                    help="also inject a phantom Pong heartbeat ('.') line after "
+                         "SEC seconds of link idle, mimicking the real radio "
+                         "(default off; SEC defaults to 5.0, the radio's idle "
+                         "heartbeat period). Like a real Pong, the '.' is sent "
+                         "only when IDLE — any replayed line resets the "
+                         "countdown, so it vanishes while traffic flows and "
+                         "reappears across gaps. The firmware counts any line as "
+                         "liveness and drops the link after ~8 s of silence, so "
+                         "use this to keep the link up across long capture gaps "
+                         "or to simulate an idle-but-alive radio")
     ap.add_argument("--echo", action="store_true", help="also print injected (TX) lines")
     # Monitoring (read the board's output back).
     ap.add_argument("--monitor-port", default=None,
@@ -229,7 +237,11 @@ def _reset_to_run(ser):
 
 
 def _send_line(tx, payload, term, echo):
-    """Write one full line under the TX lock (tx=None means dry-run/stdout)."""
+    """Write one full line under the TX lock (tx=None means dry-run/stdout).
+
+    Records the send time so the heartbeat thread can tell when the link has
+    been idle long enough to need a phantom '.' (the Pong's idle-only beacon)."""
+    global _last_tx
     if tx is not None:
         with _tx_lock:
             tx.write(payload.encode("ascii", "replace") + term)
@@ -237,20 +249,33 @@ def _send_line(tx, payload, term, echo):
             _emit(">", payload)
     else:
         _emit(">", payload)
+    _last_tx = time.monotonic()
 
 
 def _start_heartbeat(args, tx, term, stop):
-    """If --heartbeat is set, start a thread injecting phantom '.' lines (the
-    Pong heartbeat the firmware keys pong_connected on) every interval until
-    `stop` is set. Returns the thread, or None when the flag is off."""
+    """If --heartbeat is set, start a thread injecting phantom '.' lines that
+    mimics the real Pong's beacon: a '.' is sent only when the link has been
+    IDLE for the heartbeat interval, and any line (replay frame or a prior
+    heartbeat) resets the countdown — so it disappears while traffic flows and
+    reappears across capture gaps / after replay ends. Runs until `stop` is set.
+    Returns the thread, or None when the flag is off."""
+    global _last_tx
     if args.heartbeat is None:
         return None
-    print(f"injecting phantom heartbeat ('.') every {args.heartbeat:g}s",
+    print(f"injecting phantom heartbeat ('.') after {args.heartbeat:g}s idle",
           file=sys.stderr)
+    _last_tx = time.monotonic()   # start the idle clock at replay start
 
     def loop():
-        while not stop.wait(args.heartbeat):
-            _send_line(tx, ".", term, args.echo)
+        while not stop.is_set():
+            idle = time.monotonic() - _last_tx
+            if idle >= args.heartbeat:
+                _send_line(tx, ".", term, args.echo)   # resets _last_tx
+                continue
+            # Sleep until the line would next go idle-due, then re-check (a line
+            # sent meanwhile pushes _last_tx forward and we wait again).
+            if stop.wait(args.heartbeat - idle):
+                return
 
     t = threading.Thread(target=loop, daemon=True)
     t.start()

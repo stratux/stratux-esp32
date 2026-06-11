@@ -37,6 +37,15 @@ static const char *TAG = "pong";
 // classifier/ss/rs suffix fits comfortably in 1024.
 #define PONG_LINE_MAX 1024
 
+// Link liveness. The Pong heartbeats '.' ONLY when idle — no messages sent in
+// the 5 s heartbeat period — so during traffic the frames themselves are the
+// liveness signal and '.' lines are absent. Key pong_connected on ANY complete
+// line, and call the link down after total silence outlasting the heartbeat
+// period plus margin (an alive Pong is guaranteed to say *something* at least
+// every ~5 s: frames when busy, '.' when idle).
+#define PONG_LINK_TIMEOUT_MS 8000
+static int64_t s_last_line_ms;
+
 // "ERROR SPI" is a fault inside the Pong's radio chip: there is no Pong reset
 // GPIO in the pin plan (GPIO32 is a static RTS level with unproven semantics)
 // and reference Stratux only logs the message. What we CAN do from this side:
@@ -133,11 +142,17 @@ static void handle_line(char *line)
 {
     diag_log_line(line);
 
+    // Any complete line proves the link is up (see PONG_LINK_TIMEOUT_MS: the
+    // heartbeat is idle-only, so frames must count as liveness too).
+    s_last_line_ms = esp_timer_get_time() / 1000;
+    g_status.pong_connected = true;
+
     pong_frame_t f = { .kind = classify(line[0]) };
 
     switch (f.kind) {
         case PONG_LINE_HEARTBEAT:
-            g_status.pong_connected = true;
+            // Idle beacon: the radio is alive with nothing to send — which
+            // also proves any earlier SPI fault has cleared.
             g_status.pong_degraded = false;
             return;
 
@@ -272,7 +287,18 @@ void pong_rx_task(void *arg)
         // ~0.85 ms of line time at 3 Mbaud against the 4 KB driver ring.
         int n = uart_read_bytes(PONG_ACTIVE_PORT, chunk, sizeof(chunk),
                                 pdMS_TO_TICKS(20));
-        if (n <= 0) continue;
+        if (n <= 0) {
+            // An alive Pong emits at least an idle '.' every ~5 s, so this
+            // much total silence means the link is down (unplugged, baud
+            // mismatch, dead radio). handle_line() flips it back up.
+            if (g_status.pong_connected &&
+                esp_timer_get_time() / 1000 - s_last_line_ms > PONG_LINK_TIMEOUT_MS) {
+                g_status.pong_connected = false;
+                ESP_LOGW(TAG, "no Pong line in %d ms; marking link down",
+                         PONG_LINK_TIMEOUT_MS);
+            }
+            continue;
+        }
 
         for (int i = 0; i < n; i++) {
             uint8_t byte = chunk[i];
