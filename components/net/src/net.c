@@ -9,6 +9,7 @@
 #include "esp_timer.h"
 #include "esp_mac.h"
 #include "lwip/sockets.h"
+#include "lwip/etharp.h"
 #include "settings.h"
 
 static const char *TAG = "net";
@@ -187,8 +188,32 @@ static bool mac_has_ip(const uint8_t mac[6])
     return false;
 }
 
-// Periodic: kick any station that has been associated past the grace window but
-// still has no resolvable IP, so it re-associates and re-runs DHCP.
+// MAC -> IP via the lwIP ARP table. A station that kept its cached IP across
+// an ESP32 reboot (so the DHCP server has no binding for it) still populates
+// ARP the moment it sends any IP traffic — that IP is as good as a lease.
+// Read-only scan without the tcpip lock: the table is static storage, and the
+// worst race is one stale/garbled adoption that the next real DHCP event or
+// nudge pass corrects.
+static bool arp_ip_for_mac(const uint8_t mac[6], uint32_t *ip_out)
+{
+    ip4_addr_t *ip;
+    struct netif *nif;
+    struct eth_addr *eth;
+    for (size_t i = 0; i < ARP_TABLE_SIZE; i++) {
+        if (etharp_get_entry(i, &ip, &nif, &eth) &&
+            memcmp(eth->addr, mac, 6) == 0) {
+            *ip_out = ip->addr;
+            return true;
+        }
+    }
+    return false;
+}
+
+// Periodic: for any station associated past the grace window with no
+// resolvable IP, first try to ADOPT its address from the ARP table (a client
+// reusing a cached lease across our reboot is reachable as-is — deauthing it
+// just causes a long, pointless outage); only kick stations ARP has never
+// seen, so they re-associate and re-run DHCP.
 static void nudge_timer_cb(void *arg)
 {
     (void)arg;
@@ -215,6 +240,17 @@ static void nudge_timer_cb(void *arg)
     for (int i = 0; i < nc; i++) {
         if (mac_has_ip(cand[i].mac))
             continue;   // resolved on its own during the grace window
+
+        uint32_t ip;
+        if (arp_ip_for_mac(cand[i].mac, &ip)) {
+            ESP_LOGI(TAG, "no DHCP lease for " MACSTR " but ARP knows "
+                          IPSTR "; adopting as lease", MAC2STR(cand[i].mac),
+                     IP2STR((ip4_addr_t *)&ip));
+            lease_upsert(cand[i].mac, ip);
+            assoc_resolved(cand[i].mac);
+            continue;
+        }
+
         ESP_LOGW(TAG, "no DHCP lease for " MACSTR " (aid=%u) after %dms; "
                       "deauth to force re-DHCP", MAC2STR(cand[i].mac),
                  cand[i].aid, NUDGE_GRACE_MS);

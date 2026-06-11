@@ -22,6 +22,7 @@ Usage:
     pong_replay.py cap.ponglog -p <pong-uart> --monitor-port <console> --monitor-baud 115200
     pong_replay.py cap.ponglog --no-monitor --rate 5               # inject only
     pong_replay.py cap.ponglog --dry-run                           # print, no serial
+    pong_replay.py cap.ponglog --heartbeat                         # phantom '.' @ 1 Hz
 
 Requires pyserial (`pip install pyserial`).
 """
@@ -33,6 +34,7 @@ import time
 from pong_capture_format import DEFAULT_PORT, format_record, parse_record
 
 _print_lock = threading.Lock()
+_tx_lock = threading.Lock()   # serialize line writes (replay vs heartbeat thread)
 _t0 = None   # monotonic start, set in main()
 
 
@@ -71,6 +73,12 @@ def main():
     ap.add_argument("--loop", action="store_true", help="replay forever")
     ap.add_argument("--eol", default="crlf", choices=["crlf", "lf", "none"],
                     help="line terminator to send (default crlf)")
+    ap.add_argument("--heartbeat", nargs="?", type=float, const=1.0, default=None,
+                    metavar="SEC",
+                    help="also inject a phantom Pong heartbeat ('.') line every "
+                         "SEC seconds (default off; SEC defaults to 1.0). The "
+                         "firmware marks the Pong link up only on heartbeat "
+                         "lines, which raw captures lack")
     ap.add_argument("--echo", action="store_true", help="also print injected (TX) lines")
     # Monitoring (read the board's output back).
     ap.add_argument("--monitor-port", default=None,
@@ -94,6 +102,8 @@ def main():
 
     if args.rate <= 0:
         sys.exit("error: --rate must be > 0")
+    if args.heartbeat is not None and args.heartbeat <= 0:
+        sys.exit("error: --heartbeat interval must be > 0")
 
     recs = load(args.capture)
     if not recs:
@@ -108,10 +118,16 @@ def main():
 
     if args.dry_run:
         _t0 = time.monotonic()
+        stop = threading.Event()
+        hb = _start_heartbeat(args, tx=None, term=term, stop=stop)
         try:
             _run(recs, args, tx=None, term=term)
         except KeyboardInterrupt:
             print("\nstopped", file=sys.stderr)
+        finally:
+            stop.set()
+            if hb is not None:
+                hb.join(timeout=1.0)
         return
 
     try:
@@ -171,12 +187,15 @@ def main():
             time.sleep(args.boot_wait)
 
     _t0 = time.monotonic()
+    hb = _start_heartbeat(args, tx=tx, term=term, stop=stop)
     try:
         _run(recs, args, tx=tx, term=term)
     except KeyboardInterrupt:
         print("\nstopped", file=sys.stderr)
     finally:
         stop.set()
+        if hb is not None:
+            hb.join(timeout=1.0)
         if reader is not None:
             reader.join(timeout=1.0)
         if own_mon and mon is not None:
@@ -209,6 +228,35 @@ def _reset_to_run(ser):
         pass
 
 
+def _send_line(tx, payload, term, echo):
+    """Write one full line under the TX lock (tx=None means dry-run/stdout)."""
+    if tx is not None:
+        with _tx_lock:
+            tx.write(payload.encode("ascii", "replace") + term)
+        if echo:
+            _emit(">", payload)
+    else:
+        _emit(">", payload)
+
+
+def _start_heartbeat(args, tx, term, stop):
+    """If --heartbeat is set, start a thread injecting phantom '.' lines (the
+    Pong heartbeat the firmware keys pong_connected on) every interval until
+    `stop` is set. Returns the thread, or None when the flag is off."""
+    if args.heartbeat is None:
+        return None
+    print(f"injecting phantom heartbeat ('.') every {args.heartbeat:g}s",
+          file=sys.stderr)
+
+    def loop():
+        while not stop.wait(args.heartbeat):
+            _send_line(tx, ".", term, args.echo)
+
+    t = threading.Thread(target=loop, daemon=True)
+    t.start()
+    return t
+
+
 def _run(recs, args, tx, term):
     """Inject all records (optionally looping). tx=None means dry-run/stdout."""
     while True:
@@ -227,12 +275,7 @@ def _replay_once(recs, args, tx, term):
         now = time.monotonic()
         if target > now:
             time.sleep(target - now)
-        if tx is not None:
-            tx.write(payload.encode("ascii", "replace") + term)
-            if args.echo:
-                _emit(">", payload)
-        else:
-            _emit(">", payload)
+        _send_line(tx, payload, term, args.echo)
 
 
 def _reader_loop(mon, stop, mon_fh):

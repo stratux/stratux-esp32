@@ -376,8 +376,16 @@ static void ws_push_work(void *arg)
         .len = u,
     };
     for (size_t i = 0; i < fdn; i++) {
-        if (httpd_ws_get_fd_info(s_server, fds[i]) == HTTPD_WS_CLIENT_WEBSOCKET)
-            httpd_ws_send_frame_async(s_server, fds[i], &frame);
+        if (httpd_ws_get_fd_info(s_server, fds[i]) != HTTPD_WS_CLIENT_WEBSOCKET)
+            continue;
+        // A failed push means the peer is gone or wedged (e.g. deauthed mid-
+        // session): close the session, or the dead socket pins one of httpd's
+        // few slots forever (LRU purge skips it — our 1 Hz sends keep it
+        // "active") and starves new connections.
+        if (httpd_ws_send_frame_async(s_server, fds[i], &frame) != ESP_OK) {
+            ESP_LOGW(TAG, "WS push to fd %d failed; closing dead session", fds[i]);
+            httpd_sess_trigger_close(s_server, fds[i]);
+        }
     }
 }
 
