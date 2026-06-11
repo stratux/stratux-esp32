@@ -40,6 +40,13 @@ void uat_uplink_tally(const pong_frame_t *f, int64_t now_ms)
     if (!f || f->hex_len == 0)
         return;
 
+    // Overlong hex is corruption, not a frame — uat_hex_to_bytes() would
+    // silently truncate it to the buffer and tally garbage as valid.
+    if (f->hex_len > UPLINK_FRAME_BYTES * 2) {
+        s_stats.bad_frames++;
+        return;
+    }
+
     // Right-pad short reads to a full frame (Stratux does the same); the
     // info-frame walk stops at the first zero-length header in the padding.
     uint8_t buf[UPLINK_FRAME_BYTES] = {0};

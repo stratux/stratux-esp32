@@ -217,3 +217,12 @@ size_t traffic_snapshot(traffic_info_t *out, size_t max)
     xSemaphoreGive(s_mutex);
     return n;
 }
+
+size_t traffic_count(void)
+{
+    if (!s_mutex) return 0;
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    size_t n = s_count;
+    xSemaphoreGive(s_mutex);
+    return n;
+}

@@ -32,7 +32,8 @@ extern const uint8_t _binary_index_html_end[];
 static traffic_info_t s_snap[WEB_TRAFFIC_ROWS];
 static char s_row[360];            // one traffic row's JSON
 static char s_wsbuf[16 * 1024];    // assembled WS frame
-static char s_ponglog[32 * 128];   // rendered diag ring
+static char s_ponglog[32 * 136];   // rendered diag ring: DIAG_LINES rows of
+                                   // up to DIAG_LINE_LEN + "<seq> " + '\n'
 
 // ---- JSON helpers -----------------------------------------------------------
 
@@ -111,19 +112,32 @@ static esp_err_t status_get(httpd_req_t *req)
 
 // ---- GET /getSettings / POST /setSettings ------------------------------------
 
+// Built with cJSON so SSID/password/region values containing quotes or
+// backslashes are escaped instead of corrupting the response.
 static esp_err_t settings_get(httpd_req_t *req)
 {
-    char buf[320];
-    int n = snprintf(buf, sizeof buf,
-        "{\"wifi_ssid\":\"%s\",\"wifi_pass\":\"%s\",\"wifi_chan\":%u,"
-        "\"pong_en\":%d,\"es_en\":%d,\"uat_en\":%d,"
-        "\"ownship\":\"%06lX\",\"alt_off\":%ld,\"region\":\"%s\"}",
-        g_settings.wifi_ssid, g_settings.wifi_pass, g_settings.wifi_chan,
-        g_settings.pong_en, g_settings.es_en, g_settings.uat_en,
-        (unsigned long)g_settings.ownship_modes, (long)g_settings.alt_off,
-        g_settings.region);
+    cJSON *j = cJSON_CreateObject();
+    if (!j) return ESP_FAIL;
+
+    char own[8];
+    snprintf(own, sizeof own, "%06lX", (unsigned long)g_settings.ownship_modes);
+    cJSON_AddStringToObject(j, "wifi_ssid", g_settings.wifi_ssid);
+    cJSON_AddStringToObject(j, "wifi_pass", g_settings.wifi_pass);
+    cJSON_AddNumberToObject(j, "wifi_chan", g_settings.wifi_chan);
+    cJSON_AddBoolToObject(j, "pong_en", g_settings.pong_en);
+    cJSON_AddBoolToObject(j, "es_en", g_settings.es_en);
+    cJSON_AddBoolToObject(j, "uat_en", g_settings.uat_en);
+    cJSON_AddStringToObject(j, "ownship", own);
+    cJSON_AddNumberToObject(j, "alt_off", g_settings.alt_off);
+    cJSON_AddStringToObject(j, "region", g_settings.region);
+
+    char *out = cJSON_PrintUnformatted(j);
+    cJSON_Delete(j);
+    if (!out) return ESP_FAIL;
     httpd_resp_set_type(req, "application/json");
-    return httpd_resp_send(req, buf, n);
+    esp_err_t err = httpd_resp_sendstr(req, out);
+    cJSON_free(out);
+    return err;
 }
 
 static void reboot_timer_cb(void *arg)
@@ -172,55 +186,64 @@ static esp_err_t settings_post(httpd_req_t *req)
         return ESP_FAIL;
     }
 
-    bool wifi_changed = false;
+    // Stage into a local copy so a validation failure mid-body (goto bad)
+    // leaves the live g_settings untouched — no partially-applied request.
+    settings_t next = g_settings;
     const cJSON *v;
 
     v = cJSON_GetObjectItem(j, "wifi_ssid");
     if (cJSON_IsString(v)) {
         size_t l = strlen(v->valuestring);
         if (l < 1 || l > 32) goto bad;
-        if (strcmp(g_settings.wifi_ssid, v->valuestring) != 0) {
-            strcpy(g_settings.wifi_ssid, v->valuestring);
-            wifi_changed = true;
-        }
+        strcpy(next.wifi_ssid, v->valuestring);
     }
     v = cJSON_GetObjectItem(j, "wifi_pass");
     if (cJSON_IsString(v)) {
         size_t l = strlen(v->valuestring);
         if (l != 0 && (l < 8 || l > 64)) goto bad;   // WPA2 bounds; empty = open
-        if (strcmp(g_settings.wifi_pass, v->valuestring) != 0) {
-            strcpy(g_settings.wifi_pass, v->valuestring);
-            wifi_changed = true;
-        }
+        strcpy(next.wifi_pass, v->valuestring);
     }
     v = cJSON_GetObjectItem(j, "wifi_chan");
     if (cJSON_IsNumber(v)) {
         int c = v->valueint;
         if (c < 1 || c > 13) goto bad;
-        if (g_settings.wifi_chan != (uint8_t)c) {
-            g_settings.wifi_chan = (uint8_t)c;
-            wifi_changed = true;
-        }
+        next.wifi_chan = (uint8_t)c;
     }
     v = cJSON_GetObjectItem(j, "pong_en");
-    if (cJSON_IsBool(v)) g_settings.pong_en = cJSON_IsTrue(v);
+    if (cJSON_IsBool(v)) next.pong_en = cJSON_IsTrue(v);
     v = cJSON_GetObjectItem(j, "es_en");
-    if (cJSON_IsBool(v)) g_settings.es_en = cJSON_IsTrue(v);
+    if (cJSON_IsBool(v)) next.es_en = cJSON_IsTrue(v);
     v = cJSON_GetObjectItem(j, "uat_en");
-    if (cJSON_IsBool(v)) g_settings.uat_en = cJSON_IsTrue(v);
+    if (cJSON_IsBool(v)) next.uat_en = cJSON_IsTrue(v);
     v = cJSON_GetObjectItem(j, "ownship");
-    if (cJSON_IsString(v))
-        g_settings.ownship_modes = (uint32_t)strtoul(v->valuestring, NULL, 16) & 0xFFFFFF;
+    if (cJSON_IsString(v)) {
+        // 1-6 hex digits, fully consumed — reject "XYZ" or a 7+ digit address
+        // instead of silently masking it to 24 bits.
+        char *end;
+        unsigned long o = strtoul(v->valuestring, &end, 16);
+        if (end == v->valuestring || *end != '\0' || o > 0xFFFFFF) goto bad;
+        next.ownship_modes = (uint32_t)o;
+    }
     v = cJSON_GetObjectItem(j, "alt_off");
-    if (cJSON_IsNumber(v)) g_settings.alt_off = v->valueint;
+    if (cJSON_IsNumber(v)) next.alt_off = v->valueint;
     v = cJSON_GetObjectItem(j, "region");
-    if (cJSON_IsString(v) && strlen(v->valuestring) <= 3)
-        strcpy(g_settings.region, v->valuestring);
+    if (cJSON_IsString(v)) {
+        if (strlen(v->valuestring) > 3) goto bad;
+        strcpy(next.region, v->valuestring);
+    }
 
     cJSON_Delete(j);
 
+    bool wifi_changed =
+        strcmp(next.wifi_ssid, g_settings.wifi_ssid) != 0 ||
+        strcmp(next.wifi_pass, g_settings.wifi_pass) != 0 ||
+        next.wifi_chan != g_settings.wifi_chan;
+
+    settings_t prev = g_settings;
+    g_settings = next;
     esp_err_t err = settings_save();
     if (err != ESP_OK) {
+        g_settings = prev;   // keep RAM consistent with what NVS still holds
         ESP_LOGE(TAG, "settings_save failed: %s", esp_err_to_name(err));
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "NVS write failed");
         return ESP_FAIL;
@@ -246,20 +269,25 @@ bad:
 
 static esp_err_t traffic_get(httpd_req_t *req)
 {
+    size_t total = traffic_count();
     size_t n = traffic_snapshot(s_snap, WEB_TRAFFIC_ROWS);
+    if (total < n) total = n;   // separate lock takes; entries may age between
     int64_t now_ms = esp_timer_get_time() / 1000;
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr_chunk(req, "{\"traffic\":[");
+    size_t emitted = 0;
     for (size_t i = 0; i < n; i++) {
         if (traffic_row_json(s_row, sizeof(s_row), &s_snap[i], now_ms) < 0)
             continue;
-        if (i) httpd_resp_sendstr_chunk(req, ",");
+        if (emitted++) httpd_resp_sendstr_chunk(req, ",");
         httpd_resp_sendstr_chunk(req, s_row);
     }
-    // The snapshot caps at WEB_TRAFFIC_ROWS of TRAFFIC_TABLE_MAX — say so.
-    httpd_resp_sendstr_chunk(req, n >= WEB_TRAFFIC_ROWS
-        ? "],\"truncated\":true}" : "],\"truncated\":false}");
+    // Rows not shown: table entries beyond the snapshot cap + formatting drops.
+    char tail[40];
+    snprintf(tail, sizeof tail, "],\"truncated\":%u}",
+             (unsigned)(total - emitted));
+    httpd_resp_sendstr_chunk(req, tail);
     httpd_resp_sendstr_chunk(req, NULL);
     return ESP_OK;
 }
@@ -349,11 +377,14 @@ static void ws_push_work(void *arg)
     if (!any_ws)
         return;   // don't bother snapshotting for nobody
 
+    size_t total = traffic_count();
     size_t n = traffic_snapshot(s_snap, WEB_TRAFFIC_ROWS);
+    if (total < n) total = n;   // separate lock takes; entries may age between
     int64_t now_ms = esp_timer_get_time() / 1000;
 
     size_t u = (size_t)snprintf(s_wsbuf, sizeof(s_wsbuf), "{\"traffic\":[");
-    size_t dropped = 0, emitted = 0;
+    // Count everything not shown, starting with entries beyond the snapshot cap.
+    size_t dropped = total - n, emitted = 0;
     for (size_t i = 0; i < n; i++) {
         int w = traffic_row_json(s_row, sizeof(s_row), &s_snap[i], now_ms);
         if (w < 0) { dropped++; continue; }

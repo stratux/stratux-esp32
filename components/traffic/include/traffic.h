@@ -94,3 +94,7 @@ void traffic_mgr_task(void *arg);
 // Copy up to `max` live entries into `out`; returns the count written. Takes
 // and releases the table mutex. Used by gdl90_emit and the web UI.
 size_t traffic_snapshot(traffic_info_t *out, size_t max);
+
+// Current live entry count. Takes and releases the table mutex. Lets a capped
+// snapshot consumer report how many entries it did NOT copy.
+size_t traffic_count(void);
