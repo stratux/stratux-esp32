@@ -17,10 +17,15 @@ the device — the pipeline is:
 Pong UART → line parser → frame decoders → traffic table → GDL90 encoder → WiFi
 ```
 
-**Status: scaffold / pre-M0.** Everything under `main/` and `components/` is a
-compile-shaped skeleton full of `TODO(Mx)` markers — there is no working firmware
-yet. Build wiring (CMake, partitions, sdkconfig) and the GDL90 CRC/framer are
-real; the decoders, traffic logic, net delivery, and web UI are stubs.
+**Status: M1 complete (verified 2026-06-11).** The traffic pipeline works
+end-to-end: Pong line parsing, 1090ES Mode-S decode (dump1090 port: CRC, ICAO
+filter, CPR, TC1–4/19/31, DF18 ADS-R/TIS-B), UAT downlink decode (dump978
+port), traffic table with extrapolation/aging, and GDL90 0x00/0xCC/0x14 unicast
+per DHCP lease on :4000 — confirmed against a real 22-min capture replayed over
+console UART0 (`docs/TESTING.md` has the procedure and results). Caveat: the
+UAT downlink path is validated only by synthetic unit tests — the capture had
+no 978 traffic; real-capture validation is deferred (TESTING.md item 1). Web UI
+(M2) and everything past it are still stubs.
 
 ## Build / flash / monitor
 
@@ -195,8 +200,9 @@ existing EFB setups "just work." Read/written via the web UI (`/getSettings`,
 
 ## Milestones
 
-- **M0** Bring-up: SoftAP up, GDL90 heartbeat (0x00) on :4000, EFB shows connected.
-- **M1** Traffic: Pong → 1090ES + UAT-downlink decode → traffic table → GDL90
+- **M0** ✅ Bring-up: SoftAP up, GDL90 heartbeat (0x00) on :4000, EFB shows connected.
+- **M1** ✅ *(UAT-downlink off-air validation deferred — docs/TESTING.md)*
+  Traffic: Pong → 1090ES + UAT-downlink decode → traffic table → GDL90
   0x14 + Stratux 0xCC. *The Mode-S decoder is the main net-new work* — needs
   CRC/parity, ICAO + non-ICAO, even/odd CPR with expiry, airborne + surface
   position, velocity (TC 19), identity (TC 1–4), NIC/NACp, DF18 ADS-R/TIS-B.
