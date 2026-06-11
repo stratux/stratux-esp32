@@ -3,7 +3,7 @@
 #include <stdbool.h>
 
 // Firmware version string, surfaced in /getStatus and the GDL90 ident.
-#define STRATUX_ESP32_VERSION "0.0.0-pre-m0"
+#define STRATUX_ESP32_VERSION "0.2.0-m2"
 
 // Cross-cutting runtime status snapshot, surfaced by the web UI (GET /getStatus)
 // and the Stratux 0xCC heartbeat. Producing tasks update their own fields; the
@@ -16,8 +16,9 @@ typedef struct {
     uint32_t es_msgs;          // 1090ES frames decoded since boot
     uint32_t es_rejected;      // 1090ES frames rejected (CRC fail / unknown DF) —
                                // distinguishes a degraded RF path from empty air
-    uint32_t uat_msgs;         // UAT frames decoded since boot
+    uint32_t uat_msgs;         // UAT downlink frames decoded since boot
     uint32_t uat_rejected;     // UAT frames rejected (bad hex / length / MDB type)
+    uint32_t uat_uplink_msgs;  // UAT uplink (FIS-B) frames received since boot
     uint32_t pong_errors;      // "ERROR SPI" + line-parse failures
     bool     utc_ok;           // real time source acquired (GPS/NTP/manual) — false until M3
     uint32_t secs_since_midnight; // seconds since 0000Z; only meaningful when utc_ok (M3)

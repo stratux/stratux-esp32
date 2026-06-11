@@ -33,11 +33,23 @@ void settings_load(void)
         return;
     }
 
-    // TODO(M2): read each key, overriding defaults only when present:
-    //   nvs_get_str(h, "wifi_ssid", ...), nvs_get_u8(h, "wifi_chan", ...),
-    //   nvs_get_u8(h, "pong_en", ...), nvs_get_u32(h, "ownship", ...), etc.
-    //   Booleans are stored as u8. Missing keys (ESP_ERR_NVS_NOT_FOUND) keep
-    //   the default already in g_settings.
+    // Each key overrides its default only when present; ESP_ERR_NVS_NOT_FOUND
+    // keeps the default already in g_settings. Booleans are stored as u8.
+    size_t len;
+    uint8_t u8;
+
+    len = sizeof(g_settings.wifi_ssid);
+    nvs_get_str(h, "wifi_ssid", g_settings.wifi_ssid, &len);
+    len = sizeof(g_settings.wifi_pass);
+    nvs_get_str(h, "wifi_pass", g_settings.wifi_pass, &len);
+    nvs_get_u8(h, "wifi_chan", &g_settings.wifi_chan);
+    if (nvs_get_u8(h, "pong_en", &u8) == ESP_OK) g_settings.pong_en = u8;
+    if (nvs_get_u8(h, "es_en",   &u8) == ESP_OK) g_settings.es_en = u8;
+    if (nvs_get_u8(h, "uat_en",  &u8) == ESP_OK) g_settings.uat_en = u8;
+    nvs_get_u32(h, "ownship", &g_settings.ownship_modes);
+    nvs_get_i32(h, "alt_off", &g_settings.alt_off);
+    len = sizeof(g_settings.region);
+    nvs_get_str(h, "region", g_settings.region, &len);
 
     nvs_close(h);
     ESP_LOGI(TAG, "settings loaded (SSID=%s, chan=%u, es=%d uat=%d)",
@@ -51,10 +63,23 @@ esp_err_t settings_save(void)
     esp_err_t err = nvs_open(NVS_NS, NVS_READWRITE, &h);
     if (err != ESP_OK) return err;
 
-    // TODO(M2): write each field with nvs_set_str / nvs_set_u8 / nvs_set_u32,
-    // then nvs_commit(). Called from the web /setSettings handler.
+    // Write every field; first error wins but commit/close always run.
+    esp_err_t e;
+    err = ESP_OK;
+    #define SET(call) do { e = (call); if (e != ESP_OK && err == ESP_OK) err = e; } while (0)
+    SET(nvs_set_str(h, "wifi_ssid", g_settings.wifi_ssid));
+    SET(nvs_set_str(h, "wifi_pass", g_settings.wifi_pass));
+    SET(nvs_set_u8 (h, "wifi_chan", g_settings.wifi_chan));
+    SET(nvs_set_u8 (h, "pong_en",   g_settings.pong_en));
+    SET(nvs_set_u8 (h, "es_en",     g_settings.es_en));
+    SET(nvs_set_u8 (h, "uat_en",    g_settings.uat_en));
+    SET(nvs_set_u32(h, "ownship",   g_settings.ownship_modes));
+    SET(nvs_set_i32(h, "alt_off",   g_settings.alt_off));
+    SET(nvs_set_str(h, "region",    g_settings.region));
+    #undef SET
 
-    err = nvs_commit(h);
+    e = nvs_commit(h);
+    if (e != ESP_OK && err == ESP_OK) err = e;
     nvs_close(h);
     return err;
 }

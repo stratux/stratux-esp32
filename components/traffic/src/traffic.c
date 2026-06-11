@@ -67,6 +67,10 @@ void traffic_upsert(const traffic_info_t *t)
         if (t->addr_type == ADDR_TYPE_ADSB_ICAO)
             slot->addr_type = ADDR_TYPE_ADSB_ICAO;
 
+        // Accumulate which bands have contributed (ES / UAT / both).
+        slot->src = t->src;
+        slot->src_bands |= t->src;
+
         // Field-by-field merge: a single 1090ES frame carries only part of the
         // state, so only overwrite the fields this report actually populated.
         // A position update should not erase a known callsign, and vice-versa.
@@ -176,8 +180,7 @@ void traffic_mgr_task(void *arg)
 
         xSemaphoreTake(s_mutex, portMAX_DELAY);
         // Extrapolate live positions, demote stale ones, then age-out by
-        // compacting the array. Bearing/distance from ownship (M3) and
-        // cross-band dedup (M2) are TODO.
+        // compacting the array. Bearing/distance from ownship is TODO (M3).
         size_t w = 0;
         for (size_t i = 0; i < s_count; i++) {
             if (now_ms - s_table[i].last_seen_ms <= TRAFFIC_AGE_OUT_MS) {

@@ -95,7 +95,23 @@ static size_t build_heartbeat(uint8_t *p)
         p[3] = (uint8_t)(s & 0xFF);
         p[4] = (uint8_t)((s >> 8) & 0xFF);
     }
-    // p[5..6] = uplink/basic+long message counts — 0 at M0 (gen_gdl90.go p.12).
+    // p[5..6]: messages received in the previous second (ICD §3.1.2): byte 5
+    // bits 7-3 = uplink count (sat. 31), bits 1-0 + byte 6 = basic+long count
+    // (sat. 1023). Stratux never implemented these (gen_gdl90.go TODO) so EFBs
+    // tolerate zeros, but the real counters exist here — report them.
+    {
+        static uint32_t last_uplink, last_basic;
+        uint32_t uplink = g_status.uat_uplink_msgs;
+        uint32_t basic  = g_status.es_msgs + g_status.uat_msgs;
+        uint32_t du = uplink - last_uplink;
+        uint32_t db = basic - last_basic;
+        last_uplink = uplink;
+        last_basic = basic;
+        if (du > 31) du = 31;
+        if (db > 1023) db = 1023;
+        p[5] = (uint8_t)((du << 3) | ((db >> 8) & 0x03));
+        p[6] = (uint8_t)(db & 0xFF);
+    }
     return 7;
 }
 

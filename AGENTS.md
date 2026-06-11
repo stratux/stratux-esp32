@@ -24,8 +24,10 @@ port), traffic table with extrapolation/aging, and GDL90 0x00/0xCC/0x14 unicast
 per DHCP lease on :4000 — confirmed against a real 22-min capture replayed over
 console UART0 (`docs/TESTING.md` has the procedure and results). Caveat: the
 UAT downlink path is validated only by synthetic unit tests — the capture had
-no 978 traffic; real-capture validation is deferred (TESTING.md item 1). Web UI
-(M2) and everything past it are still stubs.
+no 978 traffic; real-capture validation is deferred (TESTING.md item 1).
+**M2 is code-complete** (settings → NVS, web UI with live traffic WS + FIS-B
+product breakdown + raw-Pong diag, cross-band source tracking) — on-device
+browser verification pending (docs/TESTING.md M2 section). M3+ are stubs.
 
 ## Build / flash / monitor
 
@@ -45,8 +47,12 @@ idf.py -B build-bt   -D RADIO=bt   build                  # M6 Connext/BT — pl
   top-level `CMakeLists.txt`. `wifi` is the default; `bt` is a reserved M6 stub.
 - Editing `sdkconfig.defaults*` only takes effect for keys not already in the
   generated `sdkconfig`; delete `sdkconfig` to re-apply defaults.
-- Web assets in `www/` are packed into the FAT `storage` partition as a separate
-  step (a `tools/` script, M2) — they are not part of the app image.
+- The web UI (`www/index.html`) is **embedded in the app image**
+  (`EMBED_TXTFILES` in `components/web/CMakeLists.txt`) — rebuild + reflash the
+  app to update it. The FAT `storage` partition stays reserved for when the UI
+  outgrows a single file, but note the current sdkconfig sets
+  `CONFIG_FATFS_LFN_NONE` (8.3 names — cannot even hold "index.html"); enable
+  LFN before reviving the FAT route.
 
 There is no compiler/linter configured outside an `idf.py` build, so editor
 (clang) "file not found" / "undeclared identifier" diagnostics for `esp_*`,
@@ -207,8 +213,12 @@ existing EFB setups "just work." Read/written via the web UI (`/getSettings`,
   CRC/parity, ICAO + non-ICAO, even/odd CPR with expiry, airborne + surface
   position, velocity (TC 19), identity (TC 1–4), NIC/NACp, DF18 ADS-R/TIS-B.
   Prefer porting dump1090's `mode_s.c` message layer over hand-rolling.
-- **M2** Web UI + robustness (settings → NVS, live traffic WS, raw-Pong diag,
-  cross-band dedup). Per-lease unicast delivery already landed in M0.
+- **M2** ✅ *(code-complete; browser verification pending — docs/TESTING.md)*
+  Web UI + robustness: settings → NVS, embedded single-page UI with live
+  traffic WS + FIS-B uplink product breakdown + raw-Pong diag (`/getPongLog`),
+  cross-band source tracking (the ICAO-keyed table already dedups across
+  bands; `src_bands` makes it visible). FAT static-asset serving deferred.
+  Per-lease unicast delivery already landed in M0.
 - **M3** GPS/ownship (0x0A/0x0B) — also supplies the time source ("UTC OK").
 - **M4** AHRS (0x65 sub-id 0x01 / Levil 0x4C).
 - **M5** UAT uplink: a) passthrough as GDL90 0x07; b) embedded FIS-B + `wxstore`

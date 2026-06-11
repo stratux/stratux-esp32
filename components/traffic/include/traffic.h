@@ -23,6 +23,12 @@ typedef enum {
 // web UI). ~300 * sizeof(traffic_info_t) (~30 KB) comfortably fits internal RAM.
 #define TRAFFIC_TABLE_MAX 300
 
+// Receive band of a report. The ICAO-keyed table merges the same aircraft heard
+// on both links into one entry; src_bands records which links contributed so
+// the web UI can show ES / UAT / ES+UAT.
+#define TRAFFIC_SRC_ES  0x01   // 1090ES (Mode-S)
+#define TRAFFIC_SRC_UAT 0x02   // 978 UAT downlink
+
 typedef struct {
     uint32_t            icao_addr;      // 24-bit address (ICAO or non-ICAO)
     traffic_addr_type_t addr_type;
@@ -41,6 +47,8 @@ typedef struct {
     uint8_t             nic, nacp;      // integrity / accuracy
     uint8_t             emitter_cat;    // GDL90 emitter category (0-39; TC 1-4)
     uint16_t            ss;             // last signal strength (raw Pong hex reading)
+    uint8_t             src;            // TRAFFIC_SRC_* of this report (decoders set)
+    uint8_t             src_bands;      // accumulated TRAFFIC_SRC_* mask (table sets)
 
     int64_t             last_seen_ms;   // esp_timer ms at last update (any frame)
     int64_t             position_ms;    // esp_timer ms of the last real position
@@ -74,8 +82,8 @@ void traffic_init(void);
 // Insert or merge a decoded report (decoders call this under no lock; the
 // function takes the table mutex internally). Entries are keyed by ICAO within
 // the ICAO-addressed class (so DF17 and a TIS-B/ADS-R rebroadcast of the same
-// aircraft merge into one entry); non-ICAO/self-assigned addresses key
-// separately. Cross-band (1090/978) dedup is M2.
+// aircraft merge into one entry, and the same aircraft heard on 1090 and 978
+// dedups cross-band); non-ICAO/self-assigned addresses key separately.
 void traffic_upsert(const traffic_info_t *t);
 
 // FreeRTOS task (1 Hz, Stratux sendTrafficUpdates): extrapolate dead-reckoned

@@ -130,3 +130,31 @@ it still reads "scaffold / pre-M0").
 | Date | Commit | Result |
 |---|---|---|
 | 2026-06-11 | 8752f14 | **PASS** — 120 s listen window: Heartbeat 117 (0.99/s, `UTC_OK=0 ts=0`), Stratux-HB 117 (0.99/s), Traffic 1,884 (15.88/s ≈ 16 concurrent positioned targets), zero CRC/deframe failures. Replay: `ponglog-07062025.ponglog` at `--rate 1.0` over console UART0. |
+
+## 3. M2 web UI verification
+
+Host-side already verified: `tools/replay_uplink.c` over `ponglog-07062025.log`
+(1,564 `+` lines → 1,049 walked frames, 7,408 FIS-B APDUs across 13 products,
+counts byte-identical to a `fisb_time.py`-based Python cross-check; the 515
+rejects are 514 short fragments + 1 odd-length line).
+
+On-device procedure — same replay setup as test 2, then in a browser at
+`http://192.168.10.1/`:
+
+1. **Status strip** updates at 1 Hz: ES/UAT counters climb, uplink count grows,
+   version shows `0.2.0-m2`.
+2. **Traffic table** populates live over the WebSocket within ~30 s; rows show
+   ICAO, tail, source (ES), positions with ✱ when extrapolated; rows age out
+   after replay stops.
+3. **UAT products table** fills (this capture: NEXRAD Regional ~3.0k, Text
+   ~1.2k, NOTAM ~1.1k, Cloud Tops, Turbulence, Icing, Lightning, …).
+4. **Raw Pong feed** (collapsible) shows live lines when expanded.
+5. **Settings round-trip**: toggle "1090ES decode" off → Save → traffic stops
+   without reboot; change WiFi channel → Save → "rebooting" → rejoin AP →
+   the form shows the persisted channel.
+6. **Regression**: `gdl90_listen.py --seconds 60` — heartbeats + traffic, zero
+   CRC failures; heartbeat bytes 5–6 (message counts) now non-zero (`--raw`).
+
+| Date | Commit | Result |
+|---|---|---|
+| _pending_ | | |

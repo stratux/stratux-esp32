@@ -1,32 +1,182 @@
 <!doctype html>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Stratux ESP32</title>
 <style>
-  body { font-family: system-ui, sans-serif; margin: 1rem; }
-  table { border-collapse: collapse; width: 100%; margin-top: 1rem; }
-  th, td { border: 1px solid #ccc; padding: 4px 8px; text-align: left; }
+  body { font-family: system-ui, sans-serif; margin: 1rem; max-width: 64rem; }
+  table { border-collapse: collapse; width: 100%; margin-top: .5rem; }
+  th, td { border: 1px solid #ccc; padding: 4px 8px; text-align: left; font-size: .9rem; }
+  h2 { margin: 1.2rem 0 .2rem; font-size: 1.05rem; }
+  #status { font-size: .95rem; }
+  .bad { color: #b00; font-weight: 600; }
+  .dim { color: #888; }
+  form#settings { display: grid; grid-template-columns: max-content 14rem; gap: .35rem .6rem; align-items: center; margin-top: .5rem; }
+  form#settings .full { grid-column: 1 / 3; }
+  pre#ponglog { background: #f6f6f6; border: 1px solid #ddd; padding: .5rem; font-size: .75rem; max-height: 16rem; overflow: auto; white-space: pre-wrap; word-break: break-all; }
+  details { margin-top: 1.2rem; }
+  button { padding: .3rem .9rem; }
 </style>
+
 <h1>Stratux ESP32</h1>
 <section id="status">connecting…</section>
+
+<h2>Traffic <span id="tcount" class="dim"></span></h2>
 <table id="traffic">
-  <thead><tr><th>ICAO</th><th>Callsign</th><th>Alt</th><th>Dist</th><th>Brg</th></tr></thead>
+  <thead><tr>
+    <th>ICAO</th><th>Tail</th><th>Cat</th><th>Src</th><th>Lat</th><th>Lng</th>
+    <th>Alt ft</th><th>Spd kt</th><th>Trk°</th><th>VS fpm</th><th>NIC/NACp</th><th>Age s</th>
+  </tr></thead>
   <tbody></tbody>
 </table>
+
+<h2>UAT uplink (FIS-B) <span id="ucount" class="dim"></span></h2>
+<table id="uat">
+  <thead><tr><th>Product</th><th>ID</th><th>Count</th><th>Last seen</th></tr></thead>
+  <tbody></tbody>
+</table>
+
+<h2>Settings</h2>
+<form id="settings">
+  <label>WiFi SSID</label><input name="wifi_ssid" maxlength="32">
+  <label>WiFi password</label><input name="wifi_pass" maxlength="64" placeholder="(empty = open AP)">
+  <label>WiFi channel</label><input name="wifi_chan" type="number" min="1" max="13">
+  <label>1090ES decode</label><input name="es_en" type="checkbox">
+  <label>UAT decode</label><input name="uat_en" type="checkbox">
+  <label>Ownship Mode-S (hex)</label><input name="ownship" maxlength="6" placeholder="e.g. A12BC3">
+  <label>Altitude offset ft</label><input name="alt_off" type="number" step="1">
+  <label>Region</label><input name="region" maxlength="3">
+  <div class="full"><button type="submit">Save</button> <span id="saveinfo"></span></div>
+</form>
+
+<details>
+  <summary>Raw Pong feed</summary>
+  <pre id="ponglog">—</pre>
+</details>
+
 <script>
-  async function poll() {
+  const $ = id => document.getElementById(id);
+  const esc = s => String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+  const orDash = v => (v === null || v === undefined) ? '—' : v;
+
+  // ---- status strip (1 Hz poll) ----
+  async function pollStatus() {
     try {
       const s = await (await fetch('/getStatus')).json();
-      document.getElementById('status').textContent =
-        `Pong ${s.pong ? 'up' : 'down'} · ES ${s.es} · UAT ${s.uat} · ` +
-        `clients ${s.clients} · UTC ${s.utc_ok ? 'ok' : '—'} · v${s.version}`;
+      $('status').innerHTML =
+        `Pong ${s.pong ? 'up' : '<span class="bad">down</span>'}` +
+        (s.degraded ? ' <span class="bad">(degraded)</span>' : '') +
+        ` · ES ${s.es} <span class="dim">(rej ${s.es_rej})</span>` +
+        ` · UAT ${s.uat} <span class="dim">(rej ${s.uat_rej})</span>` +
+        ` · uplink ${s.uplink} · errors ${s.pong_err}` +
+        ` · clients ${s.clients}/${s.leases}` +
+        ` · UTC ${s.utc_ok ? 'ok' : '—'} · v${s.version}`;
     } catch (e) {
-      document.getElementById('status').textContent = 'disconnected';
+      $('status').innerHTML = '<span class="bad">disconnected</span>';
     }
   }
-  setInterval(poll, 1000);
-  poll();
+  setInterval(pollStatus, 1000);
+  pollStatus();
 
-  // M2: live traffic over WebSocket.
-  const ws = new WebSocket(`ws://${location.host}/traffic`);
-  ws.onmessage = e => { /* TODO(M2): render JSON rows into #traffic tbody */ };
+  // ---- traffic table (WebSocket push, 1 Hz) ----
+  const SRC = { 1: 'ES', 2: 'UAT', 3: 'ES+UAT' };
+  function renderTraffic(msg) {
+    const rows = (msg.traffic || [])
+      .slice()
+      .sort((a, b) => (b.lat !== null) - (a.lat !== null) || a.age - b.age);
+    $('tcount').textContent =
+      `${rows.length} targets` + (msg.truncated ? ` (+${msg.truncated} not shown)` : '');
+    $('traffic').tBodies[0].innerHTML = rows.map(t => `<tr>
+      <td>${esc(t.icao)}</td>
+      <td>${esc(orDash(t.tail))}</td>
+      <td>${orDash(t.cat)}</td>
+      <td>${SRC[t.src] || '?'}</td>
+      <td>${t.lat === null ? '—' : t.lat.toFixed(4) + (t.ext ? ' ✱' : '')}</td>
+      <td>${t.lng === null ? '—' : t.lng.toFixed(4)}</td>
+      <td>${orDash(t.alt)}${t.gnd ? ' <span class="dim">gnd</span>' : ''}</td>
+      <td>${orDash(t.spd)}</td>
+      <td>${orDash(t.trk)}</td>
+      <td>${orDash(t.vvel)}</td>
+      <td>${orDash(t.nic)}/${orDash(t.nacp)}</td>
+      <td>${t.age.toFixed(0)}</td>
+    </tr>`).join('');
+  }
+  let wsRetry = 0;
+  function connectWS() {
+    const ws = new WebSocket(`ws://${location.host}/traffic`);
+    ws.onmessage = e => { wsRetry = 0; renderTraffic(JSON.parse(e.data)); };
+    ws.onclose = () => {
+      $('tcount').textContent = '(live feed lost — reconnecting)';
+      setTimeout(connectWS, Math.min(1000 * 2 ** wsRetry++, 15000));
+    };
+  }
+  connectWS();
+
+  // ---- UAT product breakdown (5 s poll) ----
+  async function pollUat() {
+    try {
+      const u = await (await fetch('/getUat')).json();
+      $('ucount').textContent =
+        `${u.uplink_frames} frames, ${u.info_frames} APDUs` +
+        (u.tisb ? `, ${u.tisb} TIS-B` : '') +
+        (u.overflow ? `, ${u.overflow} overflow` : '');
+      const ps = (u.products || []).slice().sort((a, b) => b.count - a.count);
+      $('uat').tBodies[0].innerHTML = ps.length
+        ? ps.map(p => `<tr><td>${esc(p.name)}</td><td>${p.id}</td>
+            <td>${p.count}</td><td>${p.age < 120 ? p.age + ' s ago' : Math.round(p.age / 60) + ' min ago'}</td></tr>`).join('')
+        : '<tr><td colspan="4" class="dim">no uplink received</td></tr>';
+    } catch (e) { /* keep last */ }
+  }
+  setInterval(pollUat, 5000);
+  pollUat();
+
+  // ---- settings ----
+  async function loadSettings() {
+    const s = await (await fetch('/getSettings')).json();
+    const f = $('settings');
+    f.wifi_ssid.value = s.wifi_ssid;
+    f.wifi_pass.value = s.wifi_pass;
+    f.wifi_chan.value = s.wifi_chan;
+    f.es_en.checked = !!s.es_en;
+    f.uat_en.checked = !!s.uat_en;
+    f.ownship.value = s.ownship === '000000' ? '' : s.ownship;
+    f.alt_off.value = s.alt_off;
+    f.region.value = s.region;
+  }
+  loadSettings();
+
+  $('settings').addEventListener('submit', async ev => {
+    ev.preventDefault();
+    const f = ev.target;
+    const body = {
+      wifi_ssid: f.wifi_ssid.value,
+      wifi_pass: f.wifi_pass.value,
+      wifi_chan: +f.wifi_chan.value,
+      es_en: f.es_en.checked,
+      uat_en: f.uat_en.checked,
+      ownship: f.ownship.value || '0',
+      alt_off: +f.alt_off.value || 0,
+      region: f.region.value || 'US',
+    };
+    $('saveinfo').textContent = 'saving…';
+    try {
+      const r = await (await fetch('/setSettings', { method: 'POST', body: JSON.stringify(body) })).json();
+      $('saveinfo').textContent = r.reboot
+        ? 'saved — rebooting, rejoin the AP' : 'saved';
+    } catch (e) {
+      $('saveinfo').textContent = 'save failed';
+    }
+  });
+
+  // ---- raw Pong feed (3 s poll, only while open) ----
+  async function pollPong() {
+    if (!document.querySelector('details').open) return;
+    try {
+      const t = await (await fetch('/getPongLog')).text();
+      const el = $('ponglog');
+      el.textContent = t || '(empty)';
+      el.scrollTop = el.scrollHeight;
+    } catch (e) { /* keep last */ }
+  }
+  setInterval(pollPong, 3000);
+  document.querySelector('details').addEventListener('toggle', pollPong);
 </script>

@@ -1,7 +1,10 @@
 #include "pong.h"
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include "sdkconfig.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "driver/uart.h"
 #include "driver/gpio.h"
 #include "esp_log.h"
@@ -61,6 +64,57 @@ static void pong_recover(void)
                   "(recovery attempt %u)", s_attempts);
 }
 
+// ---- raw-line diagnostic ring (web /getPongLog) -----------------------------
+//
+// Every line lands here before decode, prefix intact, so the web UI can show
+// exactly what the radio is saying (the bring-up seam for real hardware).
+// Written only by the pong task; read by the httpd task under the spinlock.
+
+#define DIAG_LINES    32
+#define DIAG_LINE_LEN 120   // FIS-B uplink lines (~877 chars) get truncated
+
+static char     s_diag[DIAG_LINES][DIAG_LINE_LEN];
+static uint32_t s_diag_seq;   // total lines ever logged; ring head = seq % N
+static portMUX_TYPE s_diag_mux = portMUX_INITIALIZER_UNLOCKED;
+
+static void diag_log_line(const char *line)
+{
+    size_t len = strlen(line);
+    bool trunc = len >= DIAG_LINE_LEN;
+    if (trunc) len = DIAG_LINE_LEN - 2;   // room for the truncation mark + NUL
+
+    taskENTER_CRITICAL(&s_diag_mux);
+    char *slot = s_diag[s_diag_seq % DIAG_LINES];
+    memcpy(slot, line, len);
+    if (trunc) slot[len++] = '~';
+    slot[len] = '\0';
+    s_diag_seq++;
+    taskEXIT_CRITICAL(&s_diag_mux);
+}
+
+size_t pong_diag_copy(char *out, size_t cap)
+{
+    if (!out || cap == 0) return 0;
+
+    // Snapshot under the lock (bounded memcpy, no formatting), render outside.
+    static char snap[DIAG_LINES][DIAG_LINE_LEN];  // httpd task only
+    taskENTER_CRITICAL(&s_diag_mux);
+    uint32_t seq = s_diag_seq;
+    memcpy(snap, s_diag, sizeof(snap));
+    taskEXIT_CRITICAL(&s_diag_mux);
+
+    uint32_t n = seq < DIAG_LINES ? seq : DIAG_LINES;
+    size_t used = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        uint32_t idx = (seq - n + i) % DIAG_LINES;   // oldest-first
+        int w = snprintf(out + used, cap - used, "%lu %s\n",
+                         (unsigned long)(seq - n + i + 1), snap[idx]);
+        if (w < 0 || (size_t)w >= cap - used) break;
+        used += (size_t)w;
+    }
+    return used;
+}
+
 // Classify a line by its first character (Appendix A).
 static pong_line_kind_t classify(char c)
 {
@@ -77,6 +131,8 @@ static pong_line_kind_t classify(char c)
 // Parse a complete line into a frame and dispatch it to the right decoder.
 static void handle_line(char *line)
 {
+    diag_log_line(line);
+
     pong_frame_t f = { .kind = classify(line[0]) };
 
     switch (f.kind) {

@@ -1,6 +1,7 @@
 idf_component_register(
     SRCS "src/uat.c"
          "src/uat_decode.c"
+         "src/uat_uplink.c"
     INCLUDE_DIRS "include"
     # uat_decode.h is private.
     PRIV_INCLUDE_DIRS "src"

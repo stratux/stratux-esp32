@@ -1,9 +1,11 @@
 #include "uat.h"
 #include <string.h>
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "stratux_status.h"
 #include "traffic.h"
 #include "uat_decode.h"
+#include "uat_uplink.h"
 
 static const char *TAG = "uat";
 
@@ -43,9 +45,11 @@ void uat_decode_frame(const pong_frame_t *f)
         return;
 
     if (f->kind == PONG_LINE_UAT_UP) {
-        // TODO(M5): uplink frames ('+') -> FIS-B products (wxstore) or 0x07
-        // relay. Counted so the web UI can show ground-station reception.
-        g_status.uat_msgs++;
+        // Tallied into the per-product FIS-B breakdown for the web UI (M2).
+        // TODO(M5): full uplink handling — FIS-B products (wxstore) or 0x07
+        // passthrough relay.
+        g_status.uat_uplink_msgs++;
+        uat_uplink_tally(f, esp_timer_get_time() / 1000);
         return;
     }
 
@@ -72,6 +76,7 @@ void uat_decode_frame(const pong_frame_t *f)
     memset(&t, 0, sizeof(t));
     t.icao_addr = mdb.address;
     t.addr_type = map_addr_type(mdb.address_qualifier);
+    t.src = TRAFFIC_SRC_UAT;
 
     if (mdb.position_valid) {
         t.position_valid = true;

@@ -137,6 +137,7 @@ void modes_decode_frame(const pong_frame_t *f)
     memset(&t, 0, sizeof(t));
     t.icao_addr = mm.addr;
     t.addr_type = map_addr_type(&mm);
+    t.src = TRAFFIC_SRC_ES;
 
     // Callsign (TC 1-4), trailing spaces trimmed.
     if (mm.callsign_valid) {
