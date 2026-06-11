@@ -25,9 +25,10 @@ per DHCP lease on :4000 — confirmed against a real 22-min capture replayed ove
 console UART0 (`docs/TESTING.md` has the procedure and results). Caveat: the
 UAT downlink path is validated only by synthetic unit tests — the capture had
 no 978 traffic; real-capture validation is deferred (TESTING.md item 1).
-**M2 is code-complete** (settings → NVS, web UI with live traffic WS + FIS-B
-product breakdown + raw-Pong diag, cross-band source tracking) — on-device
-browser verification pending (docs/TESTING.md M2 section). M3+ are stubs.
+**M2 is complete (verified 2026-06-11)**: settings → NVS, web UI with live
+traffic WS + FIS-B product breakdown + raw-Pong diag, cross-band source
+tracking — all six on-device browser checks pass (docs/TESTING.md M2 section).
+M3+ are stubs.
 
 ## Build / flash / monitor
 
@@ -218,7 +219,7 @@ existing EFB setups "just work." Read/written via the web UI (`/getSettings`,
   CRC/parity, ICAO + non-ICAO, even/odd CPR with expiry, airborne + surface
   position, velocity (TC 19), identity (TC 1–4), NIC/NACp, DF18 ADS-R/TIS-B.
   Prefer porting dump1090's `mode_s.c` message layer over hand-rolling.
-- **M2** ✅ *(code-complete; browser verification pending — docs/TESTING.md)*
+- **M2** ✅ *(verified 2026-06-11 — docs/TESTING.md M2 section)*
   Web UI + robustness: settings → NVS, embedded single-page UI with live
   traffic WS + FIS-B uplink product breakdown + raw-Pong diag (`/getPongLog`),
   cross-band source tracking (the ICAO-keyed table already dedups across

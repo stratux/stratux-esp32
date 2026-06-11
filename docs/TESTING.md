@@ -142,7 +142,10 @@ On-device procedure — same replay setup as test 2, then in a browser at
 `http://192.168.10.1/`:
 
 1. **Status strip** updates at 1 Hz: ES/UAT counters climb, uplink count grows,
-   version shows `0.2.0-m2`.
+   version shows `0.2.0-m2`. **Pong link**: shows "up" while replay lines flow
+   (no `--heartbeat` flag needed — any line counts as liveness; a real Pong
+   heartbeats `.` only after 5 s of idle), and flips to "down" within ~8 s of
+   stopping the replay.
 2. **Traffic table** populates live over the WebSocket within ~30 s; rows show
    ICAO, tail, source (ES), positions with ✱ when extrapolated; rows age out
    after replay stops.
@@ -157,4 +160,4 @@ On-device procedure — same replay setup as test 2, then in a browser at
 
 | Date | Commit | Result |
 |---|---|---|
-| _pending_ | | |
+| 2026-06-11 | cb35348 | PASS — all 6 checks (status strip + Pong up/down, live traffic WS + ✱ + age-out, UAT products NEXRAD ~3.0k/Text ~1.2k/NOTAM ~1.1k, raw Pong feed, settings round-trip, gdl90_listen 60 s zero CRC fails). Replay of `ponglog-07062025.ponglog` over UART0. |
