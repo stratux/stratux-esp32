@@ -14,6 +14,9 @@
 #include "stratux_status.h"
 #include "modes.h"
 #include "uat.h"
+#if CONFIG_PONG_SOURCE_CONSOLE
+#include "console_cmd.h"
+#endif
 
 static const char *TAG = "pong";
 
@@ -140,6 +143,16 @@ static pong_line_kind_t classify(char c)
 // Parse a complete line into a frame and dispatch it to the right decoder.
 static void handle_line(char *line)
 {
+#if CONFIG_PONG_SOURCE_CONSOLE
+    // Console-replay builds share UART0 between injected Pong lines and the
+    // '$' command channel (console_cmd). Route commands out before they touch
+    // the diag ring or count as Pong liveness — '$' is not a Pong classifier.
+    if (line[0] == '$') {
+        console_cmd_handle_line(line);
+        return;
+    }
+#endif
+
     diag_log_line(line);
 
     // Any complete line proves the link is up (see PONG_LINK_TIMEOUT_MS: the

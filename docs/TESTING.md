@@ -161,3 +161,32 @@ On-device procedure — same replay setup as test 2, then in a browser at
 | Date | Commit | Result |
 |---|---|---|
 | 2026-06-11 | cb35348 | PASS — all 6 checks (status strip + Pong up/down, live traffic WS + ✱ + age-out, UAT products NEXRAD ~3.0k/Text ~1.2k/NOTAM ~1.1k, raw Pong feed, settings round-trip, gdl90_listen 60 s zero CRC fails). Replay of `ponglog-07062025.ponglog` over UART0. |
+
+## 4. WiFi client (STA) mode + serial config channel — UNVERIFIED on-device
+
+Both build variants compile (production and `CONFIG_PONG_SOURCE_CONSOLE`);
+the checks below need real hardware + a real network.
+
+1. **No-reset serial get**: `tools/wifi_config.py -p <console> get` →
+   `$OK sta_en=0 ... state=disabled` and `$OK dest=` — and NO boot banner in
+   the output (the tool must not reset the board on connect).
+2. **Join a network**: `wifi_config.py -p <port> set --enable --ssid <net>
+   --pass <pw>` → `$OK saved (reboot to apply)`; `reboot`; then `get` →
+   `state=connected ip=... gw=... dns=...`. The `stratux` AP must still beacon
+   and an EFB on it must still receive traffic.
+3. **Static GDL90 target**: `set --dest <LAN host>` (applies live, no reboot);
+   `gdl90_listen.py` on that host sees ~1/s heartbeats with zero CRC failures
+   *without* joining the SoftAP.
+4. **Web UI**: settings form round-trips the four new fields; changing
+   sta_en/sta_ssid/sta_pass replies `reboot:true`; a bad IP in "GDL90 targets"
+   → 400 and nothing saved; status strip shows `STA <ip> (gw .., dns ..)`.
+5. **Resilience**: power off the joined AP → backoff reconnect logs (1→30 s
+   cap), SoftAP/EFB delivery unaffected; power restore → reconnects.
+6. **Negative serial**: `$WIFI SET pass=short` → `$ERR`; `$BOGUS` → `$ERR
+   unknown command`; a quoted SSID with spaces round-trips through `get`.
+7. **Replay-build coexistence**: with `CONFIG_PONG_SOURCE_CONSOLE=y`,
+   `wifi_config.py get` works on the same port as `pong_replay.py` ('$' lines
+   route through pong's classifier; capture lines never start with '$').
+
+| Date | Commit | Result |
+|---|---|---|

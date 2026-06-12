@@ -13,4 +13,5 @@ idf_component_register(
         gdl90_out
         net
         web
+        console_cmd
 )

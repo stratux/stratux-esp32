@@ -15,6 +15,10 @@ typedef struct {
     uint32_t ownship_modes;   // NVS "ownship"    (OwnshipModeS)    default 0 (unset)
     int32_t  alt_off;         // NVS "alt_off"    (AltitudeOffset)  default 0
     char     region[4];       // NVS "region"     (RegionSelected)  default "US"
+    bool     sta_en;          // NVS "sta_en"     (WiFi client mode) default false
+    char     sta_ssid[33];    // NVS "sta_ssid"                     default ""
+    char     sta_pass[65];    // NVS "sta_pass"                     default "" (open)
+    char     gdl90_dest[64];  // NVS "gdl90_dest" CSV, <=4 IPv4     default ""
 } settings_t;
 
 // Process-wide cached config. Populated by settings_load(); the web UI mutates

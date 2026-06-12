@@ -13,6 +13,7 @@
 #include "modes.h"
 #include "pong.h"
 #include "web.h"
+#include "console_cmd.h"
 
 static const char *TAG = "stratux";
 
@@ -26,7 +27,7 @@ void app_main(void)
     ESP_ERROR_CHECK(nvs);
 
     settings_load();             // NVS -> g_settings (defaults if unset)
-    net_wifi_softap_start();     // SSID "stratux", 192.168.10.1, UDP :4000 sink
+    net_wifi_start();            // SoftAP (+STA client if enabled), UDP :4000 sink
     gdl90_out_init();            // CRC self-test + HDLC/CRC framer
     traffic_init();              // table + mutex
     modes_init();                // Mode-S CRC table + ICAO address filter
@@ -37,6 +38,7 @@ void app_main(void)
     xTaskCreate(gdl90_emit_task,  "gdl90_emit",  4096, NULL,  9, NULL);
 
     web_start();                 // esp_http_server + WS (M2)
+    console_cmd_start();         // '$' WiFi/dest config channel on UART0
 
     ESP_LOGI(TAG, "stratux-esp32 up");
 }

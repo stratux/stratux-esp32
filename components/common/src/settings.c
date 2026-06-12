@@ -21,6 +21,7 @@ static void apply_defaults(settings_t *s)
     s->ownship_modes = 0;          // unset
     s->alt_off      = 0;
     strcpy(s->region, "US");
+    // sta_en/sta_ssid/sta_pass/gdl90_dest stay zeroed: client mode off.
 }
 
 void settings_load(void)
@@ -50,6 +51,13 @@ void settings_load(void)
     nvs_get_i32(h, "alt_off", &g_settings.alt_off);
     len = sizeof(g_settings.region);
     nvs_get_str(h, "region", g_settings.region, &len);
+    if (nvs_get_u8(h, "sta_en", &u8) == ESP_OK) g_settings.sta_en = u8;
+    len = sizeof(g_settings.sta_ssid);
+    nvs_get_str(h, "sta_ssid", g_settings.sta_ssid, &len);
+    len = sizeof(g_settings.sta_pass);
+    nvs_get_str(h, "sta_pass", g_settings.sta_pass, &len);
+    len = sizeof(g_settings.gdl90_dest);
+    nvs_get_str(h, "gdl90_dest", g_settings.gdl90_dest, &len);
 
     nvs_close(h);
     ESP_LOGI(TAG, "settings loaded (SSID=%s, chan=%u, es=%d uat=%d)",
@@ -76,6 +84,10 @@ esp_err_t settings_save(void)
     SET(nvs_set_u32(h, "ownship",   g_settings.ownship_modes));
     SET(nvs_set_i32(h, "alt_off",   g_settings.alt_off));
     SET(nvs_set_str(h, "region",    g_settings.region));
+    SET(nvs_set_u8 (h, "sta_en",    g_settings.sta_en));
+    SET(nvs_set_str(h, "sta_ssid",  g_settings.sta_ssid));
+    SET(nvs_set_str(h, "sta_pass",  g_settings.sta_pass));
+    SET(nvs_set_str(h, "gdl90_dest", g_settings.gdl90_dest));
     #undef SET
 
     e = nvs_commit(h);

@@ -16,6 +16,13 @@ static const char *TAG = "net";
 
 #define GDL90_UDP_PORT   4000
 #define MAX_CLIENTS      8        // SoftAP max_connection is 4; headroom for churn
+#define MAX_STATIC_DEST  4        // user-configured GDL90 unicast targets
+#define MAX_DEST         (MAX_CLIENTS + MAX_STATIC_DEST)
+
+// STA reconnect backoff: 1 s doubling to a 30 s cap. Connecting is fully
+// async — boot never waits on the join.
+#define STA_RETRY_MIN_S  1
+#define STA_RETRY_MAX_S  30
 
 // Deauth-nudge: if a station associates but never re-runs DHCP (common after an
 // ESP32 reboot — the client keeps its cached IP, so IP_EVENT_AP_STAIPASSIGNED
@@ -30,6 +37,17 @@ static int               s_udp_sock = -1;
 static SemaphoreHandle_t s_lease_mux;
 static esp_netif_t      *s_ap_netif;   // SoftAP handle, for DHCP lease lookups
 static esp_timer_handle_t s_nudge_timer;
+
+// STA (WiFi client) state. s_sta_ip doubles as the "connected" flag.
+static esp_netif_t       *s_sta_netif;
+static volatile uint32_t  s_sta_ip;        // network byte order; 0 = not connected
+static volatile uint32_t  s_sta_gw;
+static esp_timer_handle_t s_sta_retry_timer;
+static int                s_sta_retry_s = STA_RETRY_MIN_S;
+
+// Static GDL90 unicast targets (g_settings.gdl90_dest), guarded by s_lease_mux.
+static uint32_t s_static_dest[MAX_STATIC_DEST];
+static int      s_static_dest_n;
 
 // EFB "lease table": one entry per associated station the SoftAP's DHCP server
 // has handed an address. This is the ESP32 equivalent of Stratux's
@@ -143,9 +161,46 @@ static void lease_remove(const uint8_t mac[6])
     xSemaphoreGive(s_lease_mux);
 }
 
+static void sta_retry_cb(void *arg)
+{
+    (void)arg;
+    esp_wifi_connect();
+}
+
 static void net_event_handler(void *arg, esp_event_base_t base,
                               int32_t id, void *data)
 {
+    if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
+        esp_wifi_connect();
+        return;
+    }
+    if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
+        wifi_event_sta_disconnected_t *e = (wifi_event_sta_disconnected_t *)data;
+        bool was_up = s_sta_ip != 0;
+        s_sta_ip = 0;
+        s_sta_gw = 0;
+        if (was_up)
+            ESP_LOGW(TAG, "STA disconnected from %s (reason %d)",
+                     g_settings.sta_ssid, e->reason);
+        if (s_sta_retry_timer) {
+            esp_timer_start_once(s_sta_retry_timer,
+                                 (uint64_t)s_sta_retry_s * 1000 * 1000);
+            ESP_LOGI(TAG, "STA retry in %ds", s_sta_retry_s);
+            if (s_sta_retry_s < STA_RETRY_MAX_S) s_sta_retry_s *= 2;
+            if (s_sta_retry_s > STA_RETRY_MAX_S) s_sta_retry_s = STA_RETRY_MAX_S;
+        }
+        return;
+    }
+    if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
+        ip_event_got_ip_t *e = (ip_event_got_ip_t *)data;
+        s_sta_ip = e->ip_info.ip.addr;
+        s_sta_gw = e->ip_info.gw.addr;
+        s_sta_retry_s = STA_RETRY_MIN_S;
+        ESP_LOGI(TAG, "STA joined %s: ip=" IPSTR " gw=" IPSTR,
+                 g_settings.sta_ssid, IP2STR(&e->ip_info.ip), IP2STR(&e->ip_info.gw));
+        return;
+    }
+
     if (base == IP_EVENT && id == IP_EVENT_AP_STAIPASSIGNED) {
         ip_event_ap_staipassigned_t *e = (ip_event_ap_staipassigned_t *)data;
         lease_upsert(e->mac, e->ip.addr);
@@ -267,14 +322,17 @@ static void nudge_timer_cb(void *arg)
     }
 }
 
-void net_wifi_softap_start(void)
+void net_wifi_start(void)
 {
+    bool sta = g_settings.sta_en && g_settings.sta_ssid[0];
+
     s_lease_mux = xSemaphoreCreateMutex();
 
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
     esp_netif_t *ap = esp_netif_create_default_wifi_ap();
     s_ap_netif = ap;
+    if (sta) s_sta_netif = esp_netif_create_default_wifi_sta();  // DHCP client by default
 
     // Pin the AP to 192.168.10.1/24 so the gateway matches Stratux defaults and
     // DHCP leases land on the subnet EFBs expect. Stop the default DHCP server,
@@ -302,6 +360,20 @@ void net_wifi_softap_start(void)
         WIFI_EVENT, WIFI_EVENT_AP_STACONNECTED, net_event_handler, NULL, NULL));
     ESP_ERROR_CHECK(esp_event_handler_instance_register(
         WIFI_EVENT, WIFI_EVENT_AP_STADISCONNECTED, net_event_handler, NULL, NULL));
+    if (sta) {
+        ESP_ERROR_CHECK(esp_event_handler_instance_register(
+            WIFI_EVENT, WIFI_EVENT_STA_START, net_event_handler, NULL, NULL));
+        ESP_ERROR_CHECK(esp_event_handler_instance_register(
+            WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, net_event_handler, NULL, NULL));
+        ESP_ERROR_CHECK(esp_event_handler_instance_register(
+            IP_EVENT, IP_EVENT_STA_GOT_IP, net_event_handler, NULL, NULL));
+
+        const esp_timer_create_args_t retry_args = {
+            .callback = sta_retry_cb,
+            .name = "sta_retry",
+        };
+        ESP_ERROR_CHECK(esp_timer_create(&retry_args, &s_sta_retry_timer));
+    }
 
     wifi_config_t wc = { 0 };
     strncpy((char *)wc.ap.ssid, g_settings.wifi_ssid, sizeof(wc.ap.ssid));
@@ -315,8 +387,25 @@ void net_wifi_softap_start(void)
         wc.ap.authmode = WIFI_AUTH_OPEN;
     }
 
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
+    ESP_ERROR_CHECK(esp_wifi_set_mode(sta ? WIFI_MODE_APSTA : WIFI_MODE_AP));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &wc));
+    if (sta) {
+        wifi_config_t sc = { 0 };
+        strncpy((char *)sc.sta.ssid, g_settings.sta_ssid, sizeof(sc.sta.ssid));
+        if (g_settings.sta_pass[0]) {
+            strncpy((char *)sc.sta.password, g_settings.sta_pass,
+                    sizeof(sc.sta.password));
+            sc.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
+        } else {
+            sc.sta.threshold.authmode = WIFI_AUTH_OPEN;
+        }
+        sc.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
+        ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sc));
+        // In APSTA the radio is single-channel: once the STA associates, the
+        // SoftAP moves to the STA network's channel and wifi_chan is moot.
+        ESP_LOGI(TAG, "STA client enabled (SSID=%s); AP will follow the STA "
+                      "channel once joined", g_settings.sta_ssid);
+    }
     ESP_ERROR_CHECK(esp_wifi_start());
 
     // GDL90 UDP sender. Datagrams are unicast per lease in net_gdl90_send().
@@ -330,9 +419,57 @@ void net_wifi_softap_start(void)
     ESP_ERROR_CHECK(esp_timer_create(&nudge_args, &s_nudge_timer));
     ESP_ERROR_CHECK(esp_timer_start_periodic(s_nudge_timer, NUDGE_PERIOD_US));
 
+    // Prime the static GDL90 target cache from the saved CSV.
+    if (net_set_static_dest(g_settings.gdl90_dest) < 0)
+        ESP_LOGW(TAG, "ignoring invalid gdl90_dest setting: \"%s\"",
+                 g_settings.gdl90_dest);
+
     ESP_LOGI(TAG, "SoftAP up: SSID=%s chan=%u auth=%s; GDL90 unicast -> leases:%d",
              g_settings.wifi_ssid, wc.ap.channel,
              g_settings.wifi_pass[0] ? "WPA2" : "open", GDL90_UDP_PORT);
+}
+
+void net_sta_status(net_sta_status_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    out->enabled = g_settings.sta_en;
+    uint32_t ip = s_sta_ip, gw = s_sta_gw;
+    out->connected = ip != 0;
+    snprintf(out->ip, sizeof(out->ip), IPSTR, IP2STR((ip4_addr_t *)&ip));
+    snprintf(out->gw, sizeof(out->gw), IPSTR, IP2STR((ip4_addr_t *)&gw));
+    uint32_t dns = 0;
+    if (out->connected && s_sta_netif) {
+        esp_netif_dns_info_t di;
+        if (esp_netif_get_dns_info(s_sta_netif, ESP_NETIF_DNS_MAIN, &di) == ESP_OK)
+            dns = di.ip.u_addr.ip4.addr;
+    }
+    snprintf(out->dns, sizeof(out->dns), IPSTR, IP2STR((ip4_addr_t *)&dns));
+}
+
+int net_set_static_dest(const char *csv)
+{
+    uint32_t tmp[MAX_STATIC_DEST];
+    int n = 0;
+
+    // Validate the whole list into tmp before touching the live cache.
+    if (csv && csv[0]) {
+        char buf[64];
+        strlcpy(buf, csv, sizeof(buf));
+        char *save = NULL;
+        for (char *tok = strtok_r(buf, ",", &save); tok;
+             tok = strtok_r(NULL, ",", &save)) {
+            struct in_addr a;
+            if (n >= MAX_STATIC_DEST || !inet_aton(tok, &a) || a.s_addr == 0)
+                return -1;
+            tmp[n++] = a.s_addr;
+        }
+    }
+
+    xSemaphoreTake(s_lease_mux, portMAX_DELAY);
+    memcpy(s_static_dest, tmp, n * sizeof(tmp[0]));
+    s_static_dest_n = n;
+    xSemaphoreGive(s_lease_mux);
+    return n;
 }
 
 int net_client_count(void)
@@ -344,7 +481,10 @@ int net_client_count(void)
 
 // Build the set of GDL90 unicast destinations (network-byte-order IPs, deduped).
 //
-// Two sources, unioned: (1) our event cache, populated when STAIPASSIGNED fires;
+// Three sources, unioned: (1) our event cache, populated when STAIPASSIGNED
+// fires; (1b) the user's static target list (g_settings.gdl90_dest — typically
+// hosts on the STA-joined network; the unbound UDP socket routes per
+// destination, so AP-subnet and STA-subnet targets both work);
 // (2) the SoftAP DHCP server's live bindings for every currently-associated
 // station, resolved via esp_netif_dhcps_get_clients_by_mac() (the ESP-IDF analog
 // of Stratux getDHCPLeases()). Polling the server each send is more robust than
@@ -366,6 +506,8 @@ static int collect_dest_ips(uint32_t *ips, int cap)
         xSemaphoreTake(s_lease_mux, portMAX_DELAY);
         for (int i = 0; i < MAX_CLIENTS; i++)
             if (s_leases[i].used) ADD_IP(s_leases[i].ip);
+        for (int i = 0; i < s_static_dest_n; i++)
+            ADD_IP(s_static_dest[i]);
         xSemaphoreGive(s_lease_mux);
     }
 
@@ -388,16 +530,16 @@ static int collect_dest_ips(uint32_t *ips, int cap)
 
 int net_lease_count(void)
 {
-    uint32_t ips[MAX_CLIENTS];
-    return collect_dest_ips(ips, MAX_CLIENTS);
+    uint32_t ips[MAX_DEST];
+    return collect_dest_ips(ips, MAX_DEST);
 }
 
 void net_gdl90_send(const uint8_t *datagram, size_t len)
 {
     if (s_udp_sock < 0 || !datagram || !len) return;
 
-    uint32_t ips[MAX_CLIENTS];
-    int n = collect_dest_ips(ips, MAX_CLIENTS);
+    uint32_t ips[MAX_DEST];
+    int n = collect_dest_ips(ips, MAX_DEST);
 
     struct sockaddr_in dst;
     memset(&dst, 0, sizeof(dst));

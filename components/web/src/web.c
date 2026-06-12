@@ -95,17 +95,23 @@ static esp_err_t root_get(httpd_req_t *req)
 
 static esp_err_t status_get(httpd_req_t *req)
 {
-    char buf[320];
+    net_sta_status_t sta;
+    net_sta_status(&sta);
+
+    char buf[448];
     int n = snprintf(buf, sizeof buf,
         "{\"version\":\"%s\",\"pong\":%d,\"degraded\":%d,\"utc_ok\":%d,"
         "\"es\":%u,\"es_rej\":%u,\"uat\":%u,\"uat_rej\":%u,\"uplink\":%u,"
-        "\"pong_err\":%u,\"clients\":%d,\"leases\":%d}",
+        "\"pong_err\":%u,\"clients\":%d,\"leases\":%d,"
+        "\"sta_en\":%d,\"sta_up\":%d,\"sta_ip\":\"%s\",\"sta_gw\":\"%s\","
+        "\"sta_dns\":\"%s\"}",
         STRATUX_ESP32_VERSION, g_status.pong_connected, g_status.pong_degraded,
         g_status.utc_ok,
         (unsigned)g_status.es_msgs, (unsigned)g_status.es_rejected,
         (unsigned)g_status.uat_msgs, (unsigned)g_status.uat_rejected,
         (unsigned)g_status.uat_uplink_msgs,
-        (unsigned)g_status.pong_errors, net_client_count(), net_lease_count());
+        (unsigned)g_status.pong_errors, net_client_count(), net_lease_count(),
+        sta.enabled, sta.connected, sta.ip, sta.gw, sta.dns);
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_send(req, buf, n);
 }
@@ -130,6 +136,10 @@ static esp_err_t settings_get(httpd_req_t *req)
     cJSON_AddStringToObject(j, "ownship", own);
     cJSON_AddNumberToObject(j, "alt_off", g_settings.alt_off);
     cJSON_AddStringToObject(j, "region", g_settings.region);
+    cJSON_AddBoolToObject(j, "sta_en", g_settings.sta_en);
+    cJSON_AddStringToObject(j, "sta_ssid", g_settings.sta_ssid);
+    cJSON_AddStringToObject(j, "sta_pass", g_settings.sta_pass);
+    cJSON_AddStringToObject(j, "gdl90_dest", g_settings.gdl90_dest);
 
     char *out = cJSON_PrintUnformatted(j);
     cJSON_Delete(j);
@@ -231,19 +241,46 @@ static esp_err_t settings_post(httpd_req_t *req)
         if (strlen(v->valuestring) > 3) goto bad;
         strcpy(next.region, v->valuestring);
     }
+    v = cJSON_GetObjectItem(j, "sta_en");
+    if (cJSON_IsBool(v)) next.sta_en = cJSON_IsTrue(v);
+    v = cJSON_GetObjectItem(j, "sta_ssid");
+    if (cJSON_IsString(v)) {
+        if (strlen(v->valuestring) > 32) goto bad;   // empty ok while disabled
+        strcpy(next.sta_ssid, v->valuestring);
+    }
+    v = cJSON_GetObjectItem(j, "sta_pass");
+    if (cJSON_IsString(v)) {
+        size_t l = strlen(v->valuestring);
+        if (l != 0 && (l < 8 || l > 64)) goto bad;   // WPA2 bounds; empty = open
+        strcpy(next.sta_pass, v->valuestring);
+    }
+    if (next.sta_en && !next.sta_ssid[0]) goto bad;  // client mode needs an SSID
+    v = cJSON_GetObjectItem(j, "gdl90_dest");
+    if (cJSON_IsString(v)) {
+        if (strlen(v->valuestring) >= sizeof(next.gdl90_dest)) goto bad;
+        strcpy(next.gdl90_dest, v->valuestring);
+        // Last staging step: validates the list AND applies it live (no reboot
+        // needed for target changes). The only failure after this is the NVS
+        // save, whose revert path below restores the previous list.
+        if (net_set_static_dest(next.gdl90_dest) < 0) goto bad;
+    }
 
     cJSON_Delete(j);
 
     bool wifi_changed =
         strcmp(next.wifi_ssid, g_settings.wifi_ssid) != 0 ||
         strcmp(next.wifi_pass, g_settings.wifi_pass) != 0 ||
-        next.wifi_chan != g_settings.wifi_chan;
+        next.wifi_chan != g_settings.wifi_chan ||
+        next.sta_en != g_settings.sta_en ||
+        strcmp(next.sta_ssid, g_settings.sta_ssid) != 0 ||
+        strcmp(next.sta_pass, g_settings.sta_pass) != 0;
 
     settings_t prev = g_settings;
     g_settings = next;
     esp_err_t err = settings_save();
     if (err != ESP_OK) {
         g_settings = prev;   // keep RAM consistent with what NVS still holds
+        net_set_static_dest(prev.gdl90_dest);
         ESP_LOGE(TAG, "settings_save failed: %s", esp_err_to_name(err));
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "NVS write failed");
         return ESP_FAIL;

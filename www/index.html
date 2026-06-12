@@ -19,6 +19,7 @@
 
 <h1>Stratux ESP32</h1>
 <section id="status">connecting…</section>
+<section id="stasta" class="dim" style="font-size:.95rem"></section>
 
 <h2>Traffic <span id="tcount" class="dim"></span></h2>
 <table id="traffic">
@@ -45,6 +46,10 @@
   <label>Ownship Mode-S (hex)</label><input name="ownship" maxlength="6" placeholder="e.g. A12BC3">
   <label>Altitude offset ft</label><input name="alt_off" type="number" step="1">
   <label>Region</label><input name="region" maxlength="3">
+  <label>WiFi client mode</label><input name="sta_en" type="checkbox">
+  <label>Client SSID</label><input name="sta_ssid" maxlength="32" placeholder="network to join">
+  <label>Client password</label><input name="sta_pass" maxlength="64" placeholder="(empty = open network)">
+  <label>GDL90 targets</label><input name="gdl90_dest" maxlength="63" placeholder="ip,ip (max 4)">
   <div class="full"><button type="submit">Save</button> <span id="saveinfo"></span></div>
 </form>
 
@@ -70,8 +75,15 @@
         ` · uplink ${s.uplink} · errors ${s.pong_err}` +
         ` · clients ${s.clients}/${s.leases}` +
         ` · UTC ${s.utc_ok ? 'ok' : '—'} · v${s.version}`;
+      $('stasta').innerHTML = !s.sta_en
+        ? 'WiFi client: off'
+        : s.sta_up
+          ? `WiFi client: <span style="color:#080;font-weight:600">connected</span>` +
+            ` — IP ${s.sta_ip} · gateway ${s.sta_gw} · DNS ${s.sta_dns}`
+          : 'WiFi client: <span class="bad">connecting…</span>';
     } catch (e) {
       $('status').innerHTML = '<span class="bad">disconnected</span>';
+      $('stasta').textContent = '';
     }
   }
   setInterval(pollStatus, 1000);
@@ -141,6 +153,10 @@
     f.ownship.value = s.ownship === '000000' ? '' : s.ownship;
     f.alt_off.value = s.alt_off;
     f.region.value = s.region;
+    f.sta_en.checked = !!s.sta_en;
+    f.sta_ssid.value = s.sta_ssid;
+    f.sta_pass.value = s.sta_pass;
+    f.gdl90_dest.value = s.gdl90_dest;
   }
   loadSettings();
 
@@ -156,6 +172,10 @@
       ownship: f.ownship.value || '0',
       alt_off: +f.alt_off.value || 0,
       region: f.region.value || 'US',
+      sta_en: f.sta_en.checked,
+      sta_ssid: f.sta_ssid.value,
+      sta_pass: f.sta_pass.value,
+      gdl90_dest: f.gdl90_dest.value.replace(/\s+/g, ''),
     };
     $('saveinfo').textContent = 'saving…';
     try {

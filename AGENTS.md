@@ -77,8 +77,9 @@ stratux-esp32/
 │   ├── uat/                    UAT decoder (downlink M1; FIS-B M5)
 │   ├── traffic/                TrafficInfo table, extrapolation, aging
 │   ├── gdl90_out/              GDL90 builders + HDLC/CRC framer (CRC is real)
-│   ├── net/                    WiFi SoftAP + UDP :4000 delivery
+│   ├── net/                    WiFi SoftAP (+STA client) + UDP :4000 delivery
 │   ├── web/                    esp_http_server + WS (M2)
+│   ├── console_cmd/            '$' config channel on console UART0
 │   └── wxstore/                M5 weather store — empty placeholder
 ├── www/                        static web UI (→ FAT storage partition)
 ├── tools/                      flash/monitor/bridge helpers (placeholders)
@@ -106,8 +107,9 @@ situation/status snapshot. Tasks spawned in `app_main`:
 | (called inline)   | `uat`       | Decode UAT downlink → traffic; uplink → FIS-B (M5) |
 | `traffic_mgr_task`| `traffic`   | Extrapolate, age-out, bearing/distance, dedup |
 | `gdl90_emit_task` | `gdl90_out` | Build + frame GDL90, hand to net layer |
-| (event loop)      | `net`       | WiFi SoftAP, UDP :4000 to clients |
+| (event loop)      | `net`       | WiFi SoftAP (+STA client), UDP :4000 to clients |
 | `web_start()`     | `web`       | esp_http_server + WS for the web UI |
+| `console_cmd_task`| `console_cmd` | '$' config commands on console UART0 |
 
 Decode is **synchronous in `pong_rx_task`** in the skeleton. If 3 Mbaud bursts
 cause UART backpressure, move decode to a queue-fed task.
@@ -195,6 +197,38 @@ Replaces the Pi's `stratux.conf`. Namespace `"stratux"`, struct in
 open AP, channel 1, AP IP `192.168.10.1`, both bands enabled, region `US` — so
 existing EFB setups "just work." Read/written via the web UI (`/getSettings`,
 `/setSettings`) at M2.
+
+**WiFi client (STA) mode:** `sta_en` / `sta_ssid` / `sta_pass` make the device
+*also* join an existing network at boot (`WIFI_MODE_APSTA` — the SoftAP stays
+up for EFBs; reconnects with 1→30 s capped backoff, never blocks boot). In
+APSTA the radio is single-channel: the AP follows the STA network's channel
+once associated, so `wifi_chan` only governs pre-/non-join operation. STA
+changes apply on reboot (web replies `reboot:true`; serial says so).
+`gdl90_dest` is a CSV of up to 4 static unicast IPs (typically hosts on the
+STA network) added to the GDL90 :4000 destination set alongside the SoftAP
+DHCP leases — applies live, no reboot. STA state (IP/gateway/DNS) is in
+`/getStatus` (`sta_*`) and the web status strip.
+
+### Serial command channel (console UART0)
+
+`components/console_cmd/` — lets a host configure WiFi/targets over the USB
+serial port without joining the SoftAP; `tools/wifi_config.py` drives it
+(get/set/reboot subcommands; opens the port with DTR/RTS deasserted so the
+board is NOT reset). One command per line; replies are single lines starting
+with `$` so they filter cleanly out of the log stream:
+
+| Command | Reply |
+|---|---|
+| `$WIFI GET` | `$OK sta_en=.. ssid=".." pass=<***\|""> ip=.. gw=.. dns=.. state=..` |
+| `$WIFI SET [sta_en=0\|1] [ssid=".."] [pass=".."]` | `$OK saved (reboot to apply)` |
+| `$DEST GET` / `$DEST SET dest=<ip[,ip…]\|"">` | `$OK dest=..` / `$OK saved` (live) |
+| `$REBOOT` | `$OK rebooting` |
+
+Values may be double-quoted (`\"`/`\\` escapes) for SSIDs/passwords with
+spaces; errors reply `$ERR <reason>`. In production builds a `console_cmd`
+task owns UART0 RX; in `CONFIG_PONG_SOURCE_CONSOLE` replay builds
+`pong_rx_task` owns UART0 and routes `$` lines over (before the diag
+ring/liveness — `$` is not a Pong classifier), so the channel works in both.
 
 ## Conventions
 

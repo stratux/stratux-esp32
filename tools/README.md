@@ -72,6 +72,17 @@ python3 tools/pong_replay.py /tmp/cap.ponglog --rate 1.0 \
     -p /dev/cu.usbserial-5C8C0111211        # replay defaults to 115200
 ```
 
+## WiFi / device config (host-side, Python)
+
+- **`wifi_config.py`** — configure WiFi client (STA) mode and the static GDL90
+  target IPs over the USB console, via the firmware's `$` command channel
+  (`components/console_cmd/`, see AGENTS.md):
+  `wifi_config.py -p <console> get` / `set --enable --ssid NET --pass PW`
+  / `set --dest ip,ip` / `reboot`. Opens the port with DTR/RTS deasserted so
+  the board is **not** reset; replies (`$OK`/`$ERR`) are filtered out of the
+  interleaved log stream. WiFi changes apply on reboot; `--dest` applies live.
+  Needs pyserial. Works in both production and console-replay builds.
+
 ## Planned (to be adapted from `connext-emulator/esp32/`)
 
 - **flash/monitor** — wrappers around `idf.py -b 115200 flash monitor` (the
