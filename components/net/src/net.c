@@ -332,7 +332,12 @@ void net_wifi_start(void)
     ESP_ERROR_CHECK(esp_event_loop_create_default());
     esp_netif_t *ap = esp_netif_create_default_wifi_ap();
     s_ap_netif = ap;
-    if (sta) s_sta_netif = esp_netif_create_default_wifi_sta();  // DHCP client by default
+    if (sta) {
+        s_sta_netif = esp_netif_create_default_wifi_sta();  // DHCP client by default
+        // DHCP option 12: the name the joined network's leases table shows
+        // (default "espressif"). Must be set before the DHCP client runs.
+        esp_netif_set_hostname(s_sta_netif, "stratux-esp32");
+    }
 
     // Pin the AP to 192.168.10.1/24 so the gateway matches Stratux defaults and
     // DHCP leases land on the subnet EFBs expect. Stop the default DHCP server,
