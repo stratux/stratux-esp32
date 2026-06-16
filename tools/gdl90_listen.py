@@ -8,8 +8,13 @@ datagram, verifies the GDL90-variant CRC (NOT XMODEM — poly 0x1021, init 0,
 data XORed into the low byte after 8 shifts; "123456789" -> 0xBEEF), decodes the
 message id, and prints heartbeat fields plus the observed rate.
 
+Each frame and the summary are tagged with the sender's IP, so multiple GDL90
+sources (e.g. the ESP32 plus a real Stratux) can be told apart; use --source to
+restrict counting to specific sender(s).
+
     gdl90_listen.py                 # bind 0.0.0.0:4000, run until Ctrl-C
     gdl90_listen.py --port 4000 --seconds 10 --raw
+    gdl90_listen.py --source 192.168.10.1 --seconds 60   # stats for one sender
 
 Pure stdlib; no pyserial needed.
 """
@@ -92,6 +97,9 @@ def main():
     ap.add_argument("--seconds", type=float, default=None,
                     help="stop after N seconds (default: run until Ctrl-C)")
     ap.add_argument("--raw", action="store_true", help="also print raw hex of each frame")
+    ap.add_argument("--source", action="append", metavar="IP",
+                    help="only count datagrams from this source IP (repeatable); "
+                         "others are noted once and ignored")
     args = ap.parse_args()
 
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -104,10 +112,12 @@ def main():
     print(f"listening on {args.bind}:{args.port} (Ctrl-C to stop) — "
           f"join the 'stratux' AP so the device unicasts to you", file=sys.stderr)
 
-    counts = {}
-    bad_crc = 0
-    first = last_hb = None
-    hb_n = 0
+    counts = {}          # (src, mid) -> count
+    bad_crc = {}         # src -> count
+    skipped = set()      # sources ignored by --source filter (warned once)
+    first = None
+    last_hb = {}         # src -> monotonic time of last heartbeat
+    hb_n = {}            # src -> heartbeat count
     t0 = time.monotonic()
     try:
         while True:
@@ -117,28 +127,35 @@ def main():
                 data, addr = s.recvfrom(2048)
             except socket.timeout:
                 continue
+            src = addr[0]
+            if args.source and src not in args.source:
+                if src not in skipped:
+                    skipped.add(src)
+                    print(f"ignoring source: {src} (not in --source)", file=sys.stderr)
+                continue
             if first is None:
                 first = time.monotonic()
-                print(f"first datagram from {addr[0]}", file=sys.stderr)
+            if not any(k[0] == src for k in counts) and src not in bad_crc:
+                print(f"new source: {src}", file=sys.stderr)
             for body, ok in deframe(data):
                 if body is None:
-                    bad_crc += 1
+                    bad_crc[src] = bad_crc.get(src, 0) + 1
                     continue
                 if not ok:
-                    bad_crc += 1
-                    print(f"  CRC FAIL  {body.hex()}")
+                    bad_crc[src] = bad_crc.get(src, 0) + 1
+                    print(f"  [{src}] CRC FAIL  {body.hex()}")
                     continue
                 mid = body[0]
-                counts[mid] = counts.get(mid, 0) + 1
+                counts[(src, mid)] = counts.get((src, mid), 0) + 1
                 name = MSG_NAMES.get(mid, f"0x{mid:02x}")
                 if args.raw:
-                    print(f"  {name}: {body.hex()}")
+                    print(f"  [{src}] {name}: {body.hex()}")
                 if mid == 0x00:
-                    hb_n += 1
+                    hb_n[src] = hb_n.get(src, 0) + 1
                     now = time.monotonic()
-                    dt = f" (+{now - last_hb:.2f}s)" if last_hb else ""
-                    last_hb = now
-                    print(f"[{name} #{hb_n}{dt}] {decode_heartbeat(body)}")
+                    dt = f" (+{now - last_hb[src]:.2f}s)" if src in last_hb else ""
+                    last_hb[src] = now
+                    print(f"[{src} {name} #{hb_n[src]}{dt}] {decode_heartbeat(body)}")
     except KeyboardInterrupt:
         pass
 
@@ -148,11 +165,16 @@ def main():
         print("no GDL90 received — is the host joined to the 'stratux' AP, and is "
               "an EFB/this host leased? (device unicasts per DHCP lease)",
               file=sys.stderr)
-    for mid, c in sorted(counts.items()):
-        rate = c / dur if dur > 0 else 0
-        print(f"{MSG_NAMES.get(mid, hex(mid)):14s} {c:6d}  ({rate:.2f}/s)", file=sys.stderr)
-    if bad_crc:
-        print(f"CRC/deframe failures: {bad_crc}", file=sys.stderr)
+    for src in sorted({k[0] for k in counts} | set(bad_crc)):
+        print(f"{src}:", file=sys.stderr)
+        for (s_, mid), c in sorted(counts.items()):
+            if s_ != src:
+                continue
+            rate = c / dur if dur > 0 else 0
+            print(f"  {MSG_NAMES.get(mid, hex(mid)):14s} {c:6d}  ({rate:.2f}/s)",
+                  file=sys.stderr)
+        if bad_crc.get(src):
+            print(f"  CRC/deframe failures: {bad_crc[src]}", file=sys.stderr)
 
 
 if __name__ == "__main__":
