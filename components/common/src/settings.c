@@ -18,6 +18,8 @@ static void apply_defaults(settings_t *s)
     s->pong_en      = true;
     s->es_en        = true;
     s->uat_en       = true;
+    s->gps_en       = true;        // GPS enabled by default (M3+)
+    s->gps_baud     = 9600;        // Default: 9600 baud
     s->ownship_modes = 0;          // unset
     s->alt_off      = 0;
     strcpy(s->region, "US");
@@ -47,6 +49,8 @@ void settings_load(void)
     if (nvs_get_u8(h, "pong_en", &u8) == ESP_OK) g_settings.pong_en = u8;
     if (nvs_get_u8(h, "es_en",   &u8) == ESP_OK) g_settings.es_en = u8;
     if (nvs_get_u8(h, "uat_en",  &u8) == ESP_OK) g_settings.uat_en = u8;
+    if (nvs_get_u8(h, "gps_en",  &u8) == ESP_OK) g_settings.gps_en = u8;
+    nvs_get_u32(h, "gps_baud", &g_settings.gps_baud);
     nvs_get_u32(h, "ownship", &g_settings.ownship_modes);
     nvs_get_i32(h, "alt_off", &g_settings.alt_off);
     len = sizeof(g_settings.region);
@@ -81,6 +85,8 @@ esp_err_t settings_save(void)
     SET(nvs_set_u8 (h, "pong_en",   g_settings.pong_en));
     SET(nvs_set_u8 (h, "es_en",     g_settings.es_en));
     SET(nvs_set_u8 (h, "uat_en",    g_settings.uat_en));
+    SET(nvs_set_u8 (h, "gps_en",    g_settings.gps_en));
+    SET(nvs_set_u32(h, "gps_baud",  g_settings.gps_baud));
     SET(nvs_set_u32(h, "ownship",   g_settings.ownship_modes));
     SET(nvs_set_i32(h, "alt_off",   g_settings.alt_off));
     SET(nvs_set_str(h, "region",    g_settings.region));

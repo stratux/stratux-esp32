@@ -5,7 +5,7 @@ idf_component_register(
     # g_status + settings   traffic: live feed   uat: FIS-B product stats
     # pong: raw-line diag ring   json: cJSON for /setSettings   esp_timer:
     # WS push timer + ages
-    REQUIRES esp_http_server net common traffic uat pong json esp_timer
+    REQUIRES esp_http_server net common traffic uat pong json esp_timer gps
     # Web UI is embedded in the app image (NUL-terminated); the FAT `storage`
     # partition route is deferred (see AGENTS.md).
     EMBED_TXTFILES "../../www/index.html"

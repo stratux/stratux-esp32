@@ -20,6 +20,7 @@
 <h1>Stratux ESP32</h1>
 <section id="status">connecting…</section>
 <section id="stasta" class="dim" style="font-size:.95rem"></section>
+<section id="gpsinfo" class="dim" style="font-size:.95rem; margin-top: .3rem;"></section>
 
 <h2>Traffic <span id="tcount" class="dim"></span></h2>
 <table id="traffic">
@@ -43,6 +44,14 @@
   <label>WiFi channel</label><input name="wifi_chan" type="number" min="1" max="13">
   <label>1090ES decode</label><input name="es_en" type="checkbox">
   <label>UAT decode</label><input name="uat_en" type="checkbox">
+  <label>GPS</label><input name="gps_en" type="checkbox">
+  <label>GPS baud</label>
+  <select name="gps_baud">
+    <option value="9600">9600</option>
+    <option value="38400">38400</option>
+    <option value="57600">57600</option>
+    <option value="115200">115200</option>
+  </select>
   <label>Ownship Mode-S (hex)</label><input name="ownship" maxlength="6" placeholder="e.g. A12BC3">
   <label>Altitude offset ft</label><input name="alt_off" type="number" step="1">
   <label>Region</label><input name="region" maxlength="3">
@@ -88,6 +97,30 @@
   }
   setInterval(pollStatus, 1000);
   pollStatus();
+
+  // ---- GPS polling (5 Hz) ----
+  async function pollGPS() {
+    try {
+      const gps = await (await fetch('/getGPS')).json();
+      if (gps.valid) {
+        $('gpsinfo').innerHTML =
+          `GPS <span style="color:#080">fix</span>` +
+          ` · lat ${gps.lat.toFixed(5)} · lng ${gps.lng.toFixed(5)}` +
+          ` · alt ${gps.alt_ft}ft` +
+          ` · track ${gps.track_deg}°` +
+          ` · speed ${gps.speed_kt}kt` +
+          ` · vvel ${gps.vvel_fpm}fpm` +
+          ` · sats ${gps.num_sats}` +
+          ` · HDOP ${gps.hdop.toFixed(1)}`;
+      } else {
+        $('gpsinfo').innerHTML = `GPS <span class="bad">no fix</span>`;
+      }
+    } catch (e) {
+      $('gpsinfo').textContent = '';
+    }
+  }
+  setInterval(pollGPS, 1000);  // 1 Hz (GPS updates at 1 Hz)
+  pollGPS();
 
   // ---- traffic table (WebSocket push, 1 Hz) ----
   const SRC = { 1: 'ES', 2: 'UAT', 3: 'ES+UAT' };
@@ -150,6 +183,8 @@
     f.wifi_chan.value = s.wifi_chan;
     f.es_en.checked = !!s.es_en;
     f.uat_en.checked = !!s.uat_en;
+    f.gps_en.checked = !!s.gps_en;
+    f.gps_baud.value = s.gps_baud;
     f.ownship.value = s.ownship === '000000' ? '' : s.ownship;
     f.alt_off.value = s.alt_off;
     f.region.value = s.region;
@@ -169,6 +204,8 @@
       wifi_chan: +f.wifi_chan.value,
       es_en: f.es_en.checked,
       uat_en: f.uat_en.checked,
+      gps_en: f.gps_en.checked,
+      gps_baud: +f.gps_baud.value,
       ownship: f.ownship.value || '0',
       alt_off: +f.alt_off.value || 0,
       region: f.region.value || 'US',
