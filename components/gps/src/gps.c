@@ -28,12 +28,18 @@ static gps_ownship_t s_ownship = {
     .lat = 0.0,
     .lng = 0.0,
     .alt_ft = 0,
+    .alt_msl_ft = 0,
     .track_deg = 0,
     .speed_kt = 0,
     .vvel_fpm = 0,
     .fix_time_ms = 0,
     .num_sats = 0,
+    .num_sats_tracked = 0,
     .hdop_x10 = 0,
+    .vdop_x10 = 0,
+    .pdop_x10 = 0,
+    .geoid_sep_ft = 0.0,
+    .fix_quality = 0,
 };
 static bool s_time_synced = false;
 
@@ -53,13 +59,13 @@ gps_ownship_t gps_get_ownship(void)
 }
 
 // Parse NMEA GGA sentence: $GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*47
-// Extract: lat, lng, alt (meters -> feet), num_sats, hdop
+// Extract: lat, lng, alt (meters -> feet), num_sats, hdop, fix_quality, geoid_sep
 // Returns true if parse succeeded.
 static bool parse_gga(const char *line, double *lat, double *lng, int32_t *alt_ft,
-                      uint8_t *num_sats, uint8_t *hdop_x10)
+                      uint8_t *num_sats, uint8_t *hdop_x10, uint8_t *fix_quality, float *geoid_sep_ft)
 {
-    // Minimal parser: skip to fields we need (1=time, 2=lat, 3=N/S, 4=lng, 5=E/W,
-    // 6=fix, 7=sats, 8=hdop, 9=alt).
+    // Fields: 0=type, 1=time, 2=lat, 3=N/S, 4=lng, 5=E/W, 6=fix, 7=sats, 8=hdop, 9=alt(m),
+    //         10=alt_unit, 11=geoid_sep(m), 12=geoid_unit, 13-14=unused
     char buf[256];
     strncpy(buf, line, sizeof(buf) - 1);
     buf[sizeof(buf) - 1] = '\0';
@@ -70,10 +76,10 @@ static bool parse_gga(const char *line, double *lat, double *lng, int32_t *alt_f
     double lat_deg = 0, lat_min = 0, lng_deg = 0, lng_min = 0;
     char lat_ns = 'N', lng_ew = 'E';
     int fix = 0;
-    double alt_m = 0;
+    double alt_m = 0, geoid_m = 0;
     double hdop = 0;
     
-    while (token != NULL && field <= 9) {
+    while (token != NULL && field <= 12) {
         if (field == 2) {
             // Latitude: DDMM.MMMM
             double val = strtod(token, NULL);
@@ -90,6 +96,7 @@ static bool parse_gga(const char *line, double *lat, double *lng, int32_t *alt_f
             lng_ew = token[0];
         } else if (field == 6) {
             fix = atoi(token);
+            *fix_quality = (uint8_t)fix;  // 0=invalid, 1=GPS, 2=DGPS
         } else if (field == 7) {
             *num_sats = (uint8_t)atoi(token);
         } else if (field == 8) {
@@ -98,6 +105,8 @@ static bool parse_gga(const char *line, double *lat, double *lng, int32_t *alt_f
             if (*hdop_x10 > 999) *hdop_x10 = 999;
         } else if (field == 9) {
             alt_m = strtod(token, NULL);
+        } else if (field == 11) {
+            geoid_m = strtod(token, NULL);
         }
         
         token = strtok_r(NULL, ",", &saveptr);
@@ -113,6 +122,7 @@ static bool parse_gga(const char *line, double *lat, double *lng, int32_t *alt_f
     if (lng_ew == 'W') *lng = -*lng;
     
     *alt_ft = (int32_t)(alt_m * 3.28084 + 0.5);  // meters to feet, round
+    *geoid_sep_ft = (float)(geoid_m * 3.28084);  // geoid separation in feet
     
     return true;
 }
@@ -189,6 +199,51 @@ static bool parse_rmc(const char *line, uint16_t *track_deg, uint16_t *speed_kt)
     return true;
 }
 
+// Parse NMEA GSA sentence: $GPGSA,A,3,04,05,,09,12,,,24,,,,,2.5,1.3,2.1*30
+// Extract: satellites used in solution, PDOP, HDOP, VDOP
+// Returns true if parse succeeded.
+static bool parse_gsa(const char *line, uint8_t *num_sats_in_solution, 
+                      uint8_t *pdop_x10, uint8_t *hdop_x10, uint8_t *vdop_x10)
+{
+    // Fields: 0=type, 1=mode(A/M), 2=fix(1/2/3), 3-14=sat IDs, 15=PDOP, 16=HDOP, 17=VDOP
+    char buf[256];
+    strncpy(buf, line, sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = '\0';
+    
+    int field = 0;
+    char *saveptr, *token = strtok_r(buf, ",", &saveptr);
+    
+    uint8_t sat_count = 0;
+    double pdop = 0, hdop = 0, vdop = 0;
+    
+    while (token != NULL && field <= 17) {
+        // Count satellites in solution (fields 3-14, non-empty = satellite ID)
+        if (field >= 3 && field <= 14) {
+            if (strlen(token) > 0) {
+                sat_count++;
+            }
+        } else if (field == 15) {
+            pdop = strtod(token, NULL);
+            *pdop_x10 = (uint8_t)(pdop * 10 + 0.5);
+            if (*pdop_x10 > 999) *pdop_x10 = 999;
+        } else if (field == 16) {
+            hdop = strtod(token, NULL);
+            *hdop_x10 = (uint8_t)(hdop * 10 + 0.5);
+            if (*hdop_x10 > 999) *hdop_x10 = 999;
+        } else if (field == 17) {
+            vdop = strtod(token, NULL);
+            *vdop_x10 = (uint8_t)(vdop * 10 + 0.5);
+            if (*vdop_x10 > 999) *vdop_x10 = 999;
+        }
+        
+        token = strtok_r(NULL, ",", &saveptr);
+        field++;
+    }
+    
+    *num_sats_in_solution = sat_count;
+    return sat_count > 0;
+}
+
 // ---- GPS Module Configuration ----
 // Send MTK (MediaTek) command: $PMTK<cmd>*hh\r\n
 // Used by GlobalTop BN-220, u-Blox, and many cheap modules.
@@ -207,18 +262,18 @@ static void gps_send_mtk_cmd(uart_port_t port, const char *cmd)
     vTaskDelay(pdMS_TO_TICKS(GPS_INIT_DELAY));
 }
 
-// Configure GPS module to output GGA and RMC at 1 Hz.
-// Tries MTK commands (BN-220, many u-blox/GlobalTop), then u-blox UBX.
+// Configure GPS module to output GGA, RMC, and GSA at 1 Hz.
+// Tries MTK commands first (BN-220, most u-blox/GlobalTop), then u-blox UBX binary.
 // Returns after sending config; module may take 1-5 sec to reboot.
 static void gps_configure_module(uart_port_t port, uint32_t target_baud)
 {
-    ESP_LOGI(TAG, "Configuring GPS module: setting GGA+RMC at 1 Hz, baud %u", target_baud);
+    ESP_LOGI(TAG, "Configuring GPS module: setting GGA+RMC+GSA at 1 Hz, baud %u", target_baud);
     
     // Flush any stale data
     uart_flush(port);
     vTaskDelay(pdMS_TO_TICKS(500));
     
-    // Try MTK commands first (BN-220, and most cheap modules support these)
+    // Try MTK commands first (BN-220, and most cheap/u-blox modules support these)
     // PMTK251 = set baud rate
     if (target_baud == 115200)
         gps_send_mtk_cmd(port, "PMTK251,115200");
@@ -227,16 +282,34 @@ static void gps_configure_module(uart_port_t port, uint32_t target_baud)
     else  // default 9600
         gps_send_mtk_cmd(port, "PMTK251,9600");
     
-    // PMTK314 = set NMEA sentence output (GGA every 1, RMC every 1, others off)
+    // PMTK314 = set NMEA sentence output
     // Format: $PMTK314,<GLL>,<RMC>,<VTG>,<GGA>,<GSA>,<GSV>,<GRS>,<GST>,<1Hz>*hh
-    // For GGA+RMC at 1 Hz: $PMTK314,0,1,0,1,0,0,0,0,0*28
-    gps_send_mtk_cmd(port, "PMTK314,0,1,0,1,0,0,0,0,0");
+    // For GGA+RMC+GSA at 1 Hz: $PMTK314,0,1,0,1,1,0,0,0,0*28
+    gps_send_mtk_cmd(port, "PMTK314,0,1,0,1,1,0,0,0,0");
     
     // PMTK220 = set update rate to 1000 ms (1 Hz)
     gps_send_mtk_cmd(port, "PMTK220,1000");
     
-    // PMTK161 = standby mode (optional; used to save power)
-    // Skip for now; let GPS stay active.
+    // Also try u-blox UBX binary protocol configuration.
+    // u-blox modules often respond to both MTK and UBX; send UBX to ensure coverage.
+    // UBX-CFG-MSG: enable GGA (0xF0, 0x00), RMC (0xF0, 0x04), GSA (0xF0, 0x02) every 1 position
+    ESP_LOGI(TAG, "Also sending u-blox UBX configuration (GGA, RMC, GSA)");
+    
+    // UBX binary message format: $sync(2) class(1) id(1) len_lo(1) len_hi(1) payload(...) cksum_a(1) cksum_b(1)\r\n
+    // CFG-MSG: class=0x06, id=0x01, length=8
+    // Format: [class] [id] [rate_DDM] [rate_UART1] [rate_UART2] [rate_USB] [rate_SPI] [reserved]
+    
+    uint8_t ubx_gga[] = {0xB5, 0x62, 0x06, 0x01, 0x08, 0x00, 0xF0, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0x23};
+    uart_write_bytes(port, (char *)ubx_gga, sizeof(ubx_gga));
+    vTaskDelay(pdMS_TO_TICKS(GPS_INIT_DELAY));
+    
+    uint8_t ubx_rmc[] = {0xB5, 0x62, 0x06, 0x01, 0x08, 0x00, 0xF0, 0x04, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0x29};
+    uart_write_bytes(port, (char *)ubx_rmc, sizeof(ubx_rmc));
+    vTaskDelay(pdMS_TO_TICKS(GPS_INIT_DELAY));
+    
+    uint8_t ubx_gsa[] = {0xB5, 0x62, 0x06, 0x01, 0x08, 0x00, 0xF0, 0x02, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0x27};
+    uart_write_bytes(port, (char *)ubx_gsa, sizeof(ubx_gsa));
+    vTaskDelay(pdMS_TO_TICKS(GPS_INIT_DELAY));
     
     ESP_LOGI(TAG, "GPS module config sent (MTK); waiting for reboot...");
     vTaskDelay(pdMS_TO_TICKS(2000));  // Module reboots after config
@@ -311,23 +384,31 @@ void gps_rx_task(void *arg)
                 
                 double lat = 0, lng = 0;
                 int32_t alt_ft = 0;
-                uint8_t num_sats = 0, hdop_x10 = 0;
+                uint8_t num_sats = 0, num_sats_solution = 0, hdop_x10 = 0, vdop_x10 = 0, pdop_x10 = 0;
+                uint8_t fix_quality = 0;
+                float geoid_sep_ft = 0;
                 uint16_t track_deg = 0, speed_kt = 0;
                 
                 if (strcmp(sent_type, "GGA") == 0) {
-                    if (parse_gga(line, &lat, &lng, &alt_ft, &num_sats, &hdop_x10)) {
+                    if (parse_gga(line, &lat, &lng, &alt_ft, &num_sats, &hdop_x10, &fix_quality, &geoid_sep_ft)) {
+                        // Calculate MSL altitude: HAE - geoid separation
+                        int32_t alt_msl_ft = alt_ft - (int32_t)geoid_sep_ft;
+                        
                         taskENTER_CRITICAL(&s_ownship_mux);
                         s_ownship.lat = lat;
                         s_ownship.lng = lng;
                         s_ownship.alt_ft = alt_ft;
+                        s_ownship.alt_msl_ft = alt_msl_ft;
                         s_ownship.num_sats = num_sats;
                         s_ownship.hdop_x10 = hdop_x10;
+                        s_ownship.geoid_sep_ft = geoid_sep_ft;
+                        s_ownship.fix_quality = fix_quality;
                         s_ownship.fix_time_ms = esp_timer_get_time() / 1000;
                         s_ownship.valid = true;
                         taskEXIT_CRITICAL(&s_ownship_mux);
                         no_fix_count = 0;
-                        ESP_LOGD(TAG, "GGA: lat=%.6f lng=%.6f alt=%ld ft sats=%u hdop=%.1f",
-                                 lat, lng, alt_ft, num_sats, hdop_x10 / 10.0);
+                        ESP_LOGD(TAG, "GGA: lat=%.6f lng=%.6f alt=%ld ft (MSL %ld ft) sats=%u hdop=%.1f geoid=%.1f",
+                                 lat, lng, alt_ft, alt_msl_ft, num_sats, hdop_x10 / 10.0, geoid_sep_ft);
                     }
                 } else if (strcmp(sent_type, "RMC") == 0) {
                     if (parse_rmc(line, &track_deg, &speed_kt)) {
@@ -336,6 +417,16 @@ void gps_rx_task(void *arg)
                         s_ownship.speed_kt = speed_kt;
                         taskEXIT_CRITICAL(&s_ownship_mux);
                         ESP_LOGD(TAG, "RMC: track=%u deg speed=%u kt", track_deg, speed_kt);
+                    }
+                } else if (strcmp(sent_type, "GSA") == 0) {
+                    if (parse_gsa(line, &num_sats_solution, &pdop_x10, &hdop_x10, &vdop_x10)) {
+                        taskENTER_CRITICAL(&s_ownship_mux);
+                        s_ownship.num_sats_tracked = num_sats_solution;
+                        s_ownship.pdop_x10 = pdop_x10;
+                        s_ownship.vdop_x10 = vdop_x10;
+                        taskEXIT_CRITICAL(&s_ownship_mux);
+                        ESP_LOGD(TAG, "GSA: sats_in_solution=%u pdop=%.1f hdop=%.1f vdop=%.1f",
+                                 num_sats_solution, pdop_x10 / 10.0, hdop_x10 / 10.0, vdop_x10 / 10.0);
                     }
                 }
             }
