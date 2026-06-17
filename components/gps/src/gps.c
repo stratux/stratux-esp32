@@ -152,7 +152,11 @@ static bool parse_rmc(const char *line, uint16_t *track_deg, uint16_t *speed_kt)
             strncpy(date_str, token, 9);
             date_str[9] = '\0';
         } else if (field == 8) {
-            *track_deg = (uint16_t)atoi(token);
+            double track = strtod(token, NULL);
+            if (track < 0.0 || track > 360.0) {
+                return false;  // Invalid track value
+            }
+            *track_deg = (uint16_t)(track + 0.5);  // round to nearest degree
         } else if (field == 7) {
             *speed_kt = (uint16_t)(strtod(token, NULL) + 0.5);  // knots, round
         }
