@@ -1,11 +1,13 @@
 #include "gdl90_out.h"
 #include <string.h>
+#include <time.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
 #include "net.h"
 #include "traffic.h"
 #include "stratux_status.h"
+#include "settings.h"
 #include "gps.h"
 
 static const char *TAG = "gdl90";
@@ -76,22 +78,26 @@ void gdl90_out_init(void)
 
 // Build the 7-byte GDL90 heartbeat (0x00). Byte layout per Stratux
 // gen_gdl90.go makeHeartbeat (the reference sender EFBs trust).
-static size_t build_heartbeat(uint8_t *p)
+static size_t build_heartbeat(uint8_t *p, bool gps_valid)
 {
     memset(p, 0, 7);
     p[0] = GDL90_MSG_HEARTBEAT;
 
     // Status Byte 1: bit0 "UAT Initialized" + bit4 "Addr talkback" — both always
-    // set by Stratux. bit7 (GPS pos valid) and bit6 (maintenance req'd) get
-    // added once GPS / error wiring exists (M3+).
+    // set by Stratux. bit7 "GPS Position Valid" is set once a GPS fix exists
+    // (M3); bit6 (maintenance req'd) is added once error wiring exists.
     p[1] = 0x01 | 0x10;
+    if (gps_valid) p[1] |= 0x80;
 
     // Status Byte 2 + 17-bit "seconds since 0000Z" timestamp: bit16 -> SB2 bit7,
     // low 16 bits -> p[3..4] little-endian; SB2 bit0 = "UTC OK".
     // AGENTS.md M0: with no clock, keep UTC OK CLEAR and the timestamp ZERO
-    // rather than lying about time. Ready for the M3 time source.
+    // rather than lying about time. The GPS time source (M3) sets g_status.utc_ok
+    // after settimeofday(); derive the timestamp from the live clock so it stays
+    // fresh between fixes (matches Stratux makeHeartbeat).
     if (g_status.utc_ok) {
-        uint32_t s = g_status.secs_since_midnight;
+        uint32_t s = (uint32_t)(time(NULL) % 86400);
+        g_status.secs_since_midnight = s;   // surfaced in /getStatus
         p[2] = (uint8_t)(((s >> 16) << 7) | 0x01);
         p[3] = (uint8_t)(s & 0xFF);
         p[4] = (uint8_t)((s >> 8) & 0xFF);
@@ -118,11 +124,11 @@ static size_t build_heartbeat(uint8_t *p)
 
 // Build the 2-byte Stratux custom heartbeat (0xCC). Layout per Stratux
 // gen_gdl90.go makeStratuxHeartbeat: bit1 = GPS valid (M3), bit0 = AHRS valid
-// (M4) — both clear now; protocol version (1) sits in bits 2+.
-static size_t build_stratux_heartbeat(uint8_t *p)
+// (M4); protocol version (1) sits in bits 2+.
+static size_t build_stratux_heartbeat(uint8_t *p, bool gps_valid)
 {
     p[0] = GDL90_MSG_STRATUX_HB;
-    p[1] = (uint8_t)(1 << 2);   // protocol version 1; GPS/AHRS bits clear
+    p[1] = (uint8_t)((1 << 2) | (gps_valid ? 0x02 : 0x00));
     return 2;
 }
 
@@ -232,75 +238,91 @@ static size_t build_traffic_report(uint8_t *p, const traffic_info_t *t)
     return 28;
 }
 
-// Build the 28-byte GDL90 Ownship Report (0x0A). Similar layout to traffic
-// (0x14) but represents our aircraft. Called only if ownship is valid (M3+).
+// Build the 28-byte GDL90 Ownship Report (0x0A). Same 28-byte layout as the
+// Traffic Report (0x14) but represents our aircraft. Ported from Stratux
+// gen_gdl90.go makeOwnshipReport. Called only when GPS ownship is valid (M3).
 static size_t build_ownship_report(uint8_t *p, const gps_ownship_t *own)
 {
     memset(p, 0, 28);
     p[0] = GDL90_MSG_OWNSHIP;
 
-    // msg[1]: address type (0 = own), alert bit (clear).
-    p[1] = 0;
-
-    // ICAO address (all zeros for ownship per GDL90 ICD).
-    p[2] = p[3] = p[4] = 0;
+    // msg[1]: alert (high nibble, 0 = none) + address type (low nibble). Use the
+    // configured Mode-S address as ADS-B/ICAO; otherwise self-assigned (0xF00000).
+    uint32_t icao = g_settings.ownship_modes;
+    if (icao != 0 && icao <= 0xFFFFFF && ((icao >> 16) & 0xFF) != 0xF0) {
+        p[1] = 0x00;   // ADS-B Out with ICAO address
+        p[2] = (uint8_t)((icao >> 16) & 0xFF);
+        p[3] = (uint8_t)((icao >> 8) & 0xFF);
+        p[4] = (uint8_t)(icao & 0xFF);
+    } else {
+        p[1] = 0x01;   // ADS-B Out with self-assigned code
+        p[2] = 0xF0; p[3] = 0x00; p[4] = 0x00;
+    }
 
     // Latitude / longitude (same encoding as traffic).
     put_latlng(&p[5], own->lat);
     put_latlng(&p[8], own->lng);
 
-    // Altitude: 25 ft resolution, 1000 ft offset.
-    int16_t encodedAlt = (int16_t)((own->alt_ft / 25) + 40);
+    // Altitude (pressure-altitude slot): MSL as the no-baro fallback EFBs use.
+    // 25 ft resolution, 1000 ft offset; 0xFFF = invalid/unavailable.
+    int16_t encodedAlt;
+    if (own->alt_msl_ft < -1000 || own->alt_msl_ft > 101350)
+        encodedAlt = 0x0FFF;
+    else
+        encodedAlt = (int16_t)((own->alt_msl_ft / 25) + 40);
     p[11] = (uint8_t)((encodedAlt & 0x0FF0) >> 4);
     p[12] = (uint8_t)((encodedAlt & 0x000F) << 4);
 
-    // "m" nibble: track valid, not extrapolated, airborne.
-    p[12] |= 0x01;   // track is valid
-    p[12] |= 0x08;   // airborne
+    // "m" nibble: 0x08 airborne + 0x01 true-track (we only emit with a fix).
+    p[12] |= 0x09;
 
-    // NIC / NACp (not available from GPS, set to 0).
-    p[13] = 0;
+    // NIC / NACp: NIC=8 (good position), NACp derived from HDOP (matches Stratux).
+    p[13] = (uint8_t)(0x80 | (own->nacp & 0x0F));
 
     // Horizontal velocity (12 bits).
     uint16_t spd = (own->speed_kt > 0xFFE ? 0xFFE : own->speed_kt);
     p[14] = (uint8_t)((spd & 0x0FF0) >> 4);
     p[15] = (uint8_t)((spd & 0x000F) << 4);
 
-    // Vertical velocity (12-bit signed, 64 fpm units).
-    int v = own->vvel_fpm / 64;
-    uint16_t vv = (uint16_t)(v & 0x0FFF);
+    // Vertical velocity: no GPS source -> 0x800 "no data" (12-bit signed).
+    uint16_t vv = 0x0800;
     p[15] |= (uint8_t)((vv & 0x0F00) >> 8);
     p[16] = (uint8_t)(vv & 0x00FF);
 
-    // Track / heading (8-bit, 360/256 deg resolution).
-    p[17] = (uint8_t)(((int)own->track_deg * 256) / 360);
+    // Track / heading (8-bit, 360/256 deg resolution); track is already 0..359.
+    uint16_t trk = own->track_deg % 360;
+    p[17] = (uint8_t)(((int)trk * 256) / 360);
 
-    // Emitter category (0 for ownship).
-    p[18] = 0;
+    // Emitter category: 0x01 "Light (ICAO) < 15,500 lbs".
+    p[18] = 0x01;
 
-    // Call sign / tail (all spaces for ownship).
-    for (int i = 19; i < 27; i++)
-        p[i] = ' ';
+    // Call sign (msg[19..26]): default ownship callsign.
+    const char *cs = "STRATUX";
+    for (int i = 0; i < 8; i++)
+        p[19 + i] = (i < (int)strlen(cs)) ? (uint8_t)cs[i] : ' ';
 
-    // msg[27]: priority / emergency status (0 = none).
+    // msg[27]: priority / emergency status (none).
     p[27] = 0;
     return 28;
 }
 
-// Build the 5-byte GDL90 Ownship Geometric Altitude (0x0B) — WGS-84
-// ellipsoid altitude used by altitude-corrected navigation. Not sent until M3+.
+// Build the 5-byte GDL90 Ownship Geometric Altitude (0x0B) — height above the
+// WGS-84 ellipsoid (HAE). Ported from Stratux makeOwnshipGeometricAltitudeReport:
+// signed 16-bit altitude at 5-ft resolution (NOT the 25-ft/1000-ft-offset format
+// used by 0x0A/0x14), then a 2-byte Vertical Metrics field.
 static size_t build_ownship_geo_alt(uint8_t *p, const gps_ownship_t *own)
 {
     memset(p, 0, 5);
     p[0] = GDL90_MSG_OWNSHIP_GEO_ALT;
 
-    // Altitude: 25 ft resolution, 1000 ft offset (same as 0x0A).
-    int16_t encodedAlt = (int16_t)((own->alt_ft / 25) + 40);
-    p[1] = (uint8_t)((encodedAlt & 0x0FF0) >> 4);
-    p[2] = (uint8_t)((encodedAlt & 0x000F) << 4);
+    int16_t encodedAlt = (int16_t)(own->alt_hae_ft / 5);   // 5-ft resolution, signed
+    p[1] = (uint8_t)((encodedAlt >> 8) & 0xFF);            // big-endian
+    p[2] = (uint8_t)(encodedAlt & 0xFF);
 
-    // msg[3..4]: vertical accuracy (0..15 = FOM 0..15; all zeros for GPS estimate).
-    p[3] = p[4] = 0;
+    // msg[3..4]: Vertical Metrics. Vertical-warning bit clear; VFOM = 10 m
+    // (matches Stratux; 0x7FFF would mean "not available").
+    p[3] = 0x00;
+    p[4] = 0x0A;
     return 5;
 }
 
@@ -331,16 +353,19 @@ void gdl90_emit_task(void *arg)
             int flen;
             size_t positioned = 0;
 
-            size_t plen = build_heartbeat(payload);
+            // Single staleness-aware snapshot drives the heartbeat GPS bits, the
+            // ownship reports, and the diag line.
+            gps_ownship_t own = gps_get_ownship();
+
+            size_t plen = build_heartbeat(payload, own.valid);
             flen = gdl90_frame(payload, plen, frame, sizeof(frame));
             if (flen > 0) net_gdl90_send(frame, (size_t)flen);
 
-            plen = build_stratux_heartbeat(payload);
+            plen = build_stratux_heartbeat(payload, own.valid);
             flen = gdl90_frame(payload, plen, frame, sizeof(frame));
             if (flen > 0) net_gdl90_send(frame, (size_t)flen);
 
             // M3: Ownship position (0x0A/0x0B) if GPS is valid.
-            gps_ownship_t own = gps_get_ownship();
             if (own.valid) {
                 plen = build_ownship_report(payload, &own);
                 flen = gdl90_frame(payload, plen, frame, sizeof(frame));
@@ -368,7 +393,6 @@ void gdl90_emit_task(void *arg)
             // shows whether frames are decoding (es_msgs), populating the table,
             // and — critically — whether any EFB lease exists to unicast to.
             if (now - last_diag >= pdMS_TO_TICKS(5000)) {
-                gps_ownship_t own = gps_get_ownship();
                 ESP_LOGI(TAG, "emit: es_msgs=%lu table=%u positioned=%u assoc=%d leases=%d gps=%s",
                          (unsigned long)g_status.es_msgs, (unsigned)n,
                          (unsigned)positioned, net_client_count(), net_lease_count(),

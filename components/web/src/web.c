@@ -128,9 +128,9 @@ static esp_err_t gps_get(httpd_req_t *req)
         "{\"valid\":%d,\"lat\":%.6f,\"lng\":%.6f,\"alt_ft\":%ld,"
         "\"track_deg\":%u,\"speed_kt\":%u,\"vvel_fpm\":%d,"
         "\"num_sats\":%u,\"hdop\":%.1f,\"age_sec\":%u}",
-        own.valid, own.lat, own.lng, own.alt_ft,
-        own.track_deg, own.speed_kt, own.vvel_fpm,
-        own.num_sats, own.hdop_x10 / 10.0,
+        own.valid, own.lat, own.lng, (long)own.alt_msl_ft,
+        (unsigned)own.track_deg, (unsigned)own.speed_kt, (int)own.vvel_fpm,
+        (unsigned)own.num_sats, own.hdop_x10 / 10.0,
         own.valid ? (unsigned)((esp_timer_get_time() / 1000 - own.fix_time_ms) / 1000) : 0);
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_send(req, buf, n);
@@ -153,6 +153,8 @@ static esp_err_t settings_get(httpd_req_t *req)
     cJSON_AddBoolToObject(j, "pong_en", g_settings.pong_en);
     cJSON_AddBoolToObject(j, "es_en", g_settings.es_en);
     cJSON_AddBoolToObject(j, "uat_en", g_settings.uat_en);
+    cJSON_AddBoolToObject(j, "gps_en", g_settings.gps_en);
+    cJSON_AddNumberToObject(j, "gps_baud", g_settings.gps_baud);
     cJSON_AddStringToObject(j, "ownship", own);
     cJSON_AddNumberToObject(j, "alt_off", g_settings.alt_off);
     cJSON_AddStringToObject(j, "region", g_settings.region);
@@ -245,6 +247,14 @@ static esp_err_t settings_post(httpd_req_t *req)
     if (cJSON_IsBool(v)) next.es_en = cJSON_IsTrue(v);
     v = cJSON_GetObjectItem(j, "uat_en");
     if (cJSON_IsBool(v)) next.uat_en = cJSON_IsTrue(v);
+    v = cJSON_GetObjectItem(j, "gps_en");
+    if (cJSON_IsBool(v)) next.gps_en = cJSON_IsTrue(v);
+    v = cJSON_GetObjectItem(j, "gps_baud");
+    if (cJSON_IsNumber(v)) {
+        uint32_t b = (uint32_t)v->valuedouble;
+        if (b != 9600 && b != 38400 && b != 57600 && b != 115200) goto bad;
+        next.gps_baud = b;
+    }
     v = cJSON_GetObjectItem(j, "ownship");
     if (cJSON_IsString(v)) {
         // 1-6 hex digits, fully consumed — reject "XYZ" or a 7+ digit address
@@ -295,6 +305,11 @@ static esp_err_t settings_post(httpd_req_t *req)
         strcmp(next.sta_ssid, g_settings.sta_ssid) != 0 ||
         strcmp(next.sta_pass, g_settings.sta_pass) != 0;
 
+    // The GPS task reads gps_en/gps_baud only at boot, so apply on reboot.
+    bool gps_changed =
+        next.gps_en != g_settings.gps_en ||
+        next.gps_baud != g_settings.gps_baud;
+
     settings_t prev = g_settings;
     g_settings = next;
     esp_err_t err = settings_save();
@@ -307,8 +322,9 @@ static esp_err_t settings_post(httpd_req_t *req)
     }
 
     httpd_resp_set_type(req, "application/json");
-    if (wifi_changed) {
-        ESP_LOGW(TAG, "WiFi settings changed; rebooting to apply");
+    if (wifi_changed || gps_changed) {
+        ESP_LOGW(TAG, "%s settings changed; rebooting to apply",
+                 wifi_changed ? "WiFi" : "GPS");
         httpd_resp_sendstr(req, "{\"ok\":true,\"reboot\":true}");
         schedule_reboot();
     } else {
