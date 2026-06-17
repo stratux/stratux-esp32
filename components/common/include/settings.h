@@ -12,6 +12,8 @@ typedef struct {
     bool     pong_en;         // NVS "pong_en"    (Pong_Enabled)    default true
     bool     es_en;           // NVS "es_en"      (ES_Enabled)      default true
     bool     uat_en;          // NVS "uat_en"     (UAT_Enabled)     default true
+    bool     gps_en;          // NVS "gps_en"     (GPS_Enabled)     default true (M3+)
+    uint32_t gps_baud;        // NVS "gps_baud"   (GPS baud rate)    default 9600
     uint32_t ownship_modes;   // NVS "ownship"    (OwnshipModeS)    default 0 (unset)
     int32_t  alt_off;         // NVS "alt_off"    (AltitudeOffset)  default 0
     char     region[4];       // NVS "region"     (RegionSelected)  default "US"

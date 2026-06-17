@@ -12,6 +12,7 @@
 #include "traffic.h"
 #include "uat_uplink.h"
 #include "pong.h"
+#include "gps.h"
 
 static const char *TAG = "web";
 
@@ -112,6 +113,25 @@ static esp_err_t status_get(httpd_req_t *req)
         (unsigned)g_status.uat_uplink_msgs,
         (unsigned)g_status.pong_errors, net_client_count(), net_lease_count(),
         sta.enabled, sta.connected, sta.ip, sta.gw, sta.dns);
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, buf, n);
+}
+
+// ---- GET /getGPS ------------------------------------------------------------
+
+static esp_err_t gps_get(httpd_req_t *req)
+{
+    gps_ownship_t own = gps_get_ownship();
+    
+    char buf[384];
+    int n = snprintf(buf, sizeof buf,
+        "{\"valid\":%d,\"lat\":%.6f,\"lng\":%.6f,\"alt_ft\":%ld,"
+        "\"track_deg\":%u,\"speed_kt\":%u,\"vvel_fpm\":%d,"
+        "\"num_sats\":%u,\"hdop\":%.1f,\"age_sec\":%u}",
+        own.valid, own.lat, own.lng, own.alt_ft,
+        own.track_deg, own.speed_kt, own.vvel_fpm,
+        own.num_sats, own.hdop_x10 / 10.0,
+        own.valid ? (unsigned)((esp_timer_get_time() / 1000 - own.fix_time_ms) / 1000) : 0);
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_send(req, buf, n);
 }
@@ -469,7 +489,7 @@ static void ws_timer_cb(void *arg)
 void web_start(void)
 {
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
-    cfg.max_uri_handlers = 12;
+    cfg.max_uri_handlers = 13;  // added /getGPS
     cfg.lru_purge_enable = true;   // EFB + browser + WS: recycle idle sockets
 
     if (httpd_start(&s_server, &cfg) != ESP_OK) {
@@ -481,6 +501,7 @@ void web_start(void)
     const httpd_uri_t uris[] = {
         { .uri = "/",            .method = HTTP_GET,  .handler = root_get },
         { .uri = "/getStatus",   .method = HTTP_GET,  .handler = status_get },
+        { .uri = "/getGPS",      .method = HTTP_GET,  .handler = gps_get },
         { .uri = "/getSettings", .method = HTTP_GET,  .handler = settings_get },
         { .uri = "/setSettings", .method = HTTP_POST, .handler = settings_post },
         { .uri = "/getTraffic",  .method = HTTP_GET,  .handler = traffic_get },

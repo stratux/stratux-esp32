@@ -12,6 +12,7 @@
 #include "traffic.h"
 #include "modes.h"
 #include "pong.h"
+#include "gps.h"
 #include "web.h"
 #include "console_cmd.h"
 
@@ -36,6 +37,7 @@ void app_main(void)
     xTaskCreate(pong_rx_task,     "pong_rx",     4096, NULL, 10, NULL);
     xTaskCreate(traffic_mgr_task, "traffic_mgr", 4096, NULL,  8, NULL);
     xTaskCreate(gdl90_emit_task,  "gdl90_emit",  4096, NULL,  9, NULL);
+    xTaskCreate(gps_rx_task,      "gps_rx",      4096, NULL,  7, NULL);
 
     web_start();                 // esp_http_server + WS (M2)
     console_cmd_start();         // '$' WiFi/dest config channel on UART0

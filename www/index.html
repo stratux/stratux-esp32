@@ -20,6 +20,7 @@
 <h1>Stratux ESP32</h1>
 <section id="status">connecting…</section>
 <section id="stasta" class="dim" style="font-size:.95rem"></section>
+<section id="gpsinfo" class="dim" style="font-size:.95rem; margin-top: .3rem;"></section>
 
 <h2>Traffic <span id="tcount" class="dim"></span></h2>
 <table id="traffic">
@@ -88,6 +89,30 @@
   }
   setInterval(pollStatus, 1000);
   pollStatus();
+
+  // ---- GPS polling (5 Hz) ----
+  async function pollGPS() {
+    try {
+      const gps = await (await fetch('/getGPS')).json();
+      if (gps.valid) {
+        $('gpsinfo').innerHTML =
+          `GPS <span style="color:#080">fix</span>` +
+          ` · lat ${gps.lat.toFixed(5)} · lng ${gps.lng.toFixed(5)}` +
+          ` · alt ${gps.alt_ft}ft` +
+          ` · track ${gps.track_deg}°` +
+          ` · speed ${gps.speed_kt}kt` +
+          ` · vvel ${gps.vvel_fpm}fpm` +
+          ` · sats ${gps.num_sats}` +
+          ` · HDOP ${gps.hdop.toFixed(1)}`;
+      } else {
+        $('gpsinfo').innerHTML = `GPS <span class="bad">no fix</span>`;
+      }
+    } catch (e) {
+      $('gpsinfo').textContent = '';
+    }
+  }
+  setInterval(pollGPS, 200);  // 5 Hz
+  pollGPS();
 
   // ---- traffic table (WebSocket push, 1 Hz) ----
   const SRC = { 1: 'ES', 2: 'UAT', 3: 'ES+UAT' };

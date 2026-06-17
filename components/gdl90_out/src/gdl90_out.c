@@ -6,6 +6,7 @@
 #include "net.h"
 #include "traffic.h"
 #include "stratux_status.h"
+#include "gps.h"
 
 static const char *TAG = "gdl90";
 
@@ -231,6 +232,78 @@ static size_t build_traffic_report(uint8_t *p, const traffic_info_t *t)
     return 28;
 }
 
+// Build the 28-byte GDL90 Ownship Report (0x0A). Similar layout to traffic
+// (0x14) but represents our aircraft. Called only if ownship is valid (M3+).
+static size_t build_ownship_report(uint8_t *p, const gps_ownship_t *own)
+{
+    memset(p, 0, 28);
+    p[0] = GDL90_MSG_OWNSHIP;
+
+    // msg[1]: address type (0 = own), alert bit (clear).
+    p[1] = 0;
+
+    // ICAO address (all zeros for ownship per GDL90 ICD).
+    p[2] = p[3] = p[4] = 0;
+
+    // Latitude / longitude (same encoding as traffic).
+    put_latlng(&p[5], own->lat);
+    put_latlng(&p[8], own->lng);
+
+    // Altitude: 25 ft resolution, 1000 ft offset.
+    int16_t encodedAlt = (int16_t)((own->alt_ft / 25) + 40);
+    p[11] = (uint8_t)((encodedAlt & 0x0FF0) >> 4);
+    p[12] = (uint8_t)((encodedAlt & 0x000F) << 4);
+
+    // "m" nibble: track valid, not extrapolated, airborne.
+    p[12] |= 0x01;   // track is valid
+    p[12] |= 0x08;   // airborne
+
+    // NIC / NACp (not available from GPS, set to 0).
+    p[13] = 0;
+
+    // Horizontal velocity (12 bits).
+    uint16_t spd = (own->speed_kt > 0xFFE ? 0xFFE : own->speed_kt);
+    p[14] = (uint8_t)((spd & 0x0FF0) >> 4);
+    p[15] = (uint8_t)((spd & 0x000F) << 4);
+
+    // Vertical velocity (12-bit signed, 64 fpm units).
+    int v = own->vvel_fpm / 64;
+    uint16_t vv = (uint16_t)(v & 0x0FFF);
+    p[15] |= (uint8_t)((vv & 0x0F00) >> 8);
+    p[16] = (uint8_t)(vv & 0x00FF);
+
+    // Track / heading (8-bit, 360/256 deg resolution).
+    p[17] = (uint8_t)(((int)own->track_deg * 256) / 360);
+
+    // Emitter category (0 for ownship).
+    p[18] = 0;
+
+    // Call sign / tail (all spaces for ownship).
+    for (int i = 19; i < 27; i++)
+        p[i] = ' ';
+
+    // msg[27]: priority / emergency status (0 = none).
+    p[27] = 0;
+    return 28;
+}
+
+// Build the 5-byte GDL90 Ownship Geometric Altitude (0x0B) — WGS-84
+// ellipsoid altitude used by altitude-corrected navigation. Not sent until M3+.
+static size_t build_ownship_geo_alt(uint8_t *p, const gps_ownship_t *own)
+{
+    memset(p, 0, 5);
+    p[0] = GDL90_MSG_OWNSHIP_GEO_ALT;
+
+    // Altitude: 25 ft resolution, 1000 ft offset (same as 0x0A).
+    int16_t encodedAlt = (int16_t)((own->alt_ft / 25) + 40);
+    p[1] = (uint8_t)((encodedAlt & 0x0FF0) >> 4);
+    p[2] = (uint8_t)((encodedAlt & 0x000F) << 4);
+
+    // msg[3..4]: vertical accuracy (0..15 = FOM 0..15; all zeros for GPS estimate).
+    p[3] = p[4] = 0;
+    return 5;
+}
+
 // Bounded snapshot buffer (static — too large for the task stack). Sized from
 // the table capacity so tuning TRAFFIC_TABLE_MAX can't silently truncate; we
 // report all positioned entries each cycle.
@@ -266,6 +339,18 @@ void gdl90_emit_task(void *arg)
             flen = gdl90_frame(payload, plen, frame, sizeof(frame));
             if (flen > 0) net_gdl90_send(frame, (size_t)flen);
 
+            // M3: Ownship position (0x0A/0x0B) if GPS is valid.
+            gps_ownship_t own = gps_get_ownship();
+            if (own.valid) {
+                plen = build_ownship_report(payload, &own);
+                flen = gdl90_frame(payload, plen, frame, sizeof(frame));
+                if (flen > 0) net_gdl90_send(frame, (size_t)flen);
+
+                plen = build_ownship_geo_alt(payload, &own);
+                flen = gdl90_frame(payload, plen, frame, sizeof(frame));
+                if (flen > 0) net_gdl90_send(frame, (size_t)flen);
+            }
+
             size_t n = traffic_snapshot(s_snap, TRAFFIC_TABLE_MAX);
             for (size_t i = 0; i < n; i++) {
                 // Position required to plot; traffic_mgr clears position_valid
@@ -283,9 +368,11 @@ void gdl90_emit_task(void *arg)
             // shows whether frames are decoding (es_msgs), populating the table,
             // and — critically — whether any EFB lease exists to unicast to.
             if (now - last_diag >= pdMS_TO_TICKS(5000)) {
-                ESP_LOGI(TAG, "emit: es_msgs=%lu table=%u positioned=%u assoc=%d leases=%d",
+                gps_ownship_t own = gps_get_ownship();
+                ESP_LOGI(TAG, "emit: es_msgs=%lu table=%u positioned=%u assoc=%d leases=%d gps=%s",
                          (unsigned long)g_status.es_msgs, (unsigned)n,
-                         (unsigned)positioned, net_client_count(), net_lease_count());
+                         (unsigned)positioned, net_client_count(), net_lease_count(),
+                         own.valid ? "valid" : "invalid");
                 last_diag = now;
             }
 
