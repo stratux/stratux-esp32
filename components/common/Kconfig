@@ -1,0 +1,24 @@
+menu "Board selection"
+
+choice BOARD_TYPE
+    prompt "Target board"
+    default BOARD_TTGO_T8
+    help
+        Select the board pin map used by components/common/include/pins.h.
+
+    config BOARD_TTGO_T8
+        bool "TTGO T8 / LilyGO"
+        help
+            Original board pin map: Pong UART2 RX=GPIO35, TX=GPIO33,
+            static RTS=GPIO32.
+
+    config BOARD_ESP32_DEVKITC_V4
+        bool "ESP32-DevKitC V4"
+        help
+            DevKitC V4 pin map with external SPI SD breakout on VSPI:
+            MISO=GPIO19, MOSI=GPIO23, CS=GPIO5, CLK=GPIO18.
+            Pong uses RX=GPIO34 and TX=GPIO25. RTS is not wired.
+endchoice
+
+endmenu
+

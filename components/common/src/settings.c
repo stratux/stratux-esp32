@@ -12,7 +12,7 @@ settings_t g_settings;
 static void apply_defaults(settings_t *s)
 {
     memset(s, 0, sizeof(*s));
-    strcpy(s->wifi_ssid, "stratux");
+    strcpy(s->wifi_ssid, "stresp32");
     s->wifi_pass[0] = '\0';        // open AP by default
     s->wifi_chan    = 1;
     s->pong_en      = true;

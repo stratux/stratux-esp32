@@ -17,8 +17,6 @@
 static const char *TAG = "gps";
 
 #define GPS_UART_PORT    UART_NUM_1
-#define GPS_RX_GPIO      GPIO_NUM_34  // input-only
-#define GPS_TX_GPIO      GPIO_NUM_4   // output for config commands
 #define GPS_RX_BUF       (2 * 1024)   // 9600 is slow; 2KB headroom is plenty
 #define GPS_LINE_MAX     128          // NMEA sentences are ~80 bytes max
 #define GPS_INIT_DELAY   100          // ms to wait between config commands
@@ -453,6 +451,12 @@ void gps_rx_task(void *arg)
 {
     (void)arg;
     uint32_t target_baud = g_settings.gps_baud;
+
+    if (GPS_RX_GPIO == GPIO_NUM_NC || GPS_TX_GPIO == GPIO_NUM_NC) {
+        ESP_LOGW(TAG, "GPS disabled: board has no GPS UART pins configured");
+        vTaskDelete(NULL);
+        return;
+    }
 
     ESP_LOGI(TAG, "Starting GPS task (UART%d, GPIO %u RX, GPIO %u TX, target %u baud)",
              GPS_UART_PORT, GPS_RX_GPIO, GPS_TX_GPIO, (unsigned)target_baud);

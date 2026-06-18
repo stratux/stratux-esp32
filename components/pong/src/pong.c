@@ -272,14 +272,17 @@ void pong_rx_task(void *arg)
     ESP_ERROR_CHECK(uart_param_config(PONG_ACTIVE_PORT, &cfg));
 
 #if !CONFIG_PONG_SOURCE_CONSOLE
-    // Real radio: route UART2 to the Pong pins and hold RTS at the static
-    // ClearRTS level on GPIO32. Keep RTS/TX off GPIO16/17 (PSRAM data, Bug B).
+    // Real radio: route UART2 to the board-specific Pong pins. Boards with a
+    // Pong RTS wire hold it at the static ClearRTS level; DevKitC leaves RTS
+    // unwired.
     // Only switch to hardware RTS if bench testing proves the Pong actually
     // pauses/resumes on it. TODO(bring-up): confirm the RTS polarity on real HW.
     ESP_ERROR_CHECK(uart_set_pin(PONG_UART_PORT, PONG_TX_GPIO, PONG_RX_GPIO,
                                  UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
+#if PONG_RTS_ENABLED
     gpio_set_direction(PONG_RTS_GPIO, GPIO_MODE_OUTPUT);
     gpio_set_level(PONG_RTS_GPIO, 0);
+#endif
     ESP_LOGI(TAG, "Pong source: radio on UART%d @ %d baud (RX=%d TX=%d RTS=%d)",
              PONG_ACTIVE_PORT, PONG_ACTIVE_BAUD, PONG_RX_GPIO, PONG_TX_GPIO, PONG_RTS_GPIO);
 #else
